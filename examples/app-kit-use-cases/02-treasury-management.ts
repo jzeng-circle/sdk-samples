@@ -13,7 +13,7 @@
 
 import 'dotenv/config';
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
-import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
 
 // ===========================
 // TYPES
@@ -64,8 +64,10 @@ const USE_SLOW_MODE = true;           // SLOW mode = free bridge (no protocol fe
 
 const kit = new StablecoinKit();
 
-const adapter = createViemAdapterFromPrivateKey({
-  privateKey: process.env.PRIVATE_KEY as string,
+const adapter = createCircleWalletAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  walletId: process.env.TREASURY_WALLET_ID as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
 });
 
 const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || '0xYourTreasuryAddress';
@@ -191,7 +193,8 @@ async function topUpLowChains(
   console.log('\n--- Topping Up Low Chains ---');
 
   const lowChains = chains.filter(
-    c => c.chain !== config.mainTreasuryChain && c.currentBalance < c.targetBalance
+    c => c.chain !== config.mainTreasuryChain &&
+    (c.targetBalance - c.currentBalance) > config.consolidationThreshold
   );
 
   if (lowChains.length === 0) {
@@ -200,32 +203,20 @@ async function topUpLowChains(
   }
 
   for (const chain of lowChains) {
-    const deficit = chain.targetBalance - chain.currentBalance;
-
-    if (deficit < config.consolidationThreshold) {
-      console.log(`  ${chain.chain}: Deficit $${deficit.toFixed(2)} below threshold — skip`);
-      continue;
-    }
+    const deficit = (chain.targetBalance - chain.currentBalance).toFixed(2);
+    console.log(`\n  Bridging $${deficit} from ${config.mainTreasuryChain} → ${chain.chain}`);
 
     try {
-      console.log(`\n  Bridging $${deficit.toFixed(2)} from ${config.mainTreasuryChain} → ${chain.chain}`);
-
       const result = await kit.bridge({
         from: { adapter, chain: config.mainTreasuryChain },
         to: { adapter, chain: chain.chain },
-        amount: deficit.toFixed(2),
-        config: {
-          transferSpeed: config.useSlowMode ? 'SLOW' : 'FAST'
-        }
+        amount: deficit,
+        config: { transferSpeed: config.useSlowMode ? 'SLOW' : 'FAST' }
       });
 
-      console.log(`  ✓ Completed`);
-      result.steps.forEach((step, i) => {
-        console.log(`    Step ${i + 1}: ${step.txHash}`);
-      });
-
+      console.log(`  ✓ Completed: ${result.steps[0].txHash}`);
     } catch (error: any) {
-      console.error(`  ✗ Failed to top up ${chain.chain}: ${error.message}`);
+      console.error(`  ✗ Failed: ${error.message}`);
     }
   }
 }
@@ -337,8 +328,8 @@ function showCostComparison() {
 // ===========================
 
 async function main() {
-  if (!process.env.PRIVATE_KEY) {
-    console.log('\n  Set PRIVATE_KEY and TREASURY_ADDRESS in .env file\n');
+  if (!process.env.CIRCLE_API_KEY || !process.env.TREASURY_WALLET_ID) {
+    console.log('\n  Set CIRCLE_API_KEY, TREASURY_WALLET_ID, CIRCLE_ENTITY_SECRET, and TREASURY_ADDRESS in .env file\n');
     showCostComparison();
     return;
   }

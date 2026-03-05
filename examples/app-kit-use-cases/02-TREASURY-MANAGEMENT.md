@@ -110,18 +110,20 @@ FINAL STATE:
 - Initializes App Kit SDK and Viem adapter with private key
 - Reads treasury address and chain from environment
 
-> **Note**: The Viem adapter derives the wallet from a private key. For managed wallets, replace it with `createCircleWalletAdapter` or `createEthersAdapter` without touching the treasury logic.
+> **Note**: This example uses Circle Wallet for managed key custody. You can swap in any other wallet adapter (Viem, Ethers, or custom) without changing the treasury logic.
 
 ```typescript
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
-import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
 
 const CONSOLIDATION_THRESHOLD = 1000; // Only move if excess > $1,000
 const USE_SLOW_MODE = true;           // Free bridge — no protocol fees
 
 const kit = new StablecoinKit();
-const adapter = createViemAdapterFromPrivateKey({
-  privateKey: process.env.PRIVATE_KEY as string,
+const adapter = createCircleWalletAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  walletId: process.env.TREASURY_WALLET_ID as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
 });
 ```
 
@@ -312,7 +314,7 @@ function generateReport(
 
 ```bash
 # Install dependencies
-npm install @circle-fin/stablecoin-kit @circle-fin/adapter-viem-v2 dotenv
+npm install @circle-fin/stablecoin-kit @circle-fin/adapter-circle-wallet dotenv
 
 # Create .env file
 touch .env
@@ -320,11 +322,13 @@ touch .env
 
 ### Environment Variables
 
-> **Note**: `PRIVATE_KEY` is the hex private key of your treasury operational wallet. For production, use a dedicated consolidation wallet with limited permissions — not your main treasury key. Alternatively, replace the Viem adapter with Circle Wallets or a hardware wallet adapter.
+> **Note**: This example uses Circle Wallet for managed key custody. To get your credentials, see the [Circle Wallet Quickstart Guide](https://developers.circle.com/w3s/docs/programmable-wallets-quickstart). You'll need an API Key and Entity Secret from the [Circle Console](https://console.circle.com/), plus the Wallet ID of your treasury wallet.
 
 ```bash
 # .env
-PRIVATE_KEY=0xYourPrivateKey
+CIRCLE_API_KEY=your_circle_api_key
+TREASURY_WALLET_ID=your_treasury_wallet_id
+CIRCLE_ENTITY_SECRET=your_entity_secret
 TREASURY_ADDRESS=0xYourTreasuryAddress
 ```
 
@@ -333,11 +337,13 @@ TREASURY_ADDRESS=0xYourTreasuryAddress
 ```typescript
 import 'dotenv/config';
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
-import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
 
 const kit = new StablecoinKit();
-const adapter = createViemAdapterFromPrivateKey({
-  privateKey: process.env.PRIVATE_KEY as string,
+const adapter = createCircleWalletAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  walletId: process.env.TREASURY_WALLET_ID as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
 });
 
 const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
