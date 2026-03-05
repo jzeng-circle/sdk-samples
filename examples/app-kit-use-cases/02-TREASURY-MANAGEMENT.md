@@ -121,9 +121,10 @@ const treasuryAdapter = createCircleWalletAdapter({
 ### Step 2: Check Balances
 
 **What this does:**
-- Fetches all token balances from Circle Wallet per chain
-- Sums all token amounts to get the total balance on each chain
+- Makes a single call to fetch all token balances across all chains
+- Sums balances per chain to get each chain's total value
 - Flags chains as EXCESS, LOW, or OK for quick visual audit
+- Returns the raw balance list so Step 3 can reuse it without another API call
 
 **Output:**
 ```
@@ -136,16 +137,15 @@ const treasuryAdapter = createCircleWalletAdapter({
 ```
 
 ```typescript
-async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
-  for (const chain of chains) {
-    // Fetch total balance across all tokens for this chain
-    const balances = await treasuryAdapter.getWalletTokenBalances({
-      walletId: process.env.TREASURY_WALLET_ID as string,
-      chain: chain.chain
-    });
+async function checkChainBalances(chains: ChainBalance[]): Promise<TokenBalance[]> {
+  // Single call to fetch all token balances across all chains
+  const allBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
 
-    // Sum all token balances to get the total value on this chain
-    chain.currentBalance = balances.reduce(
+  for (const chain of chains) {
+    const chainBalances = allBalances.filter(b => b.chain === chain.chain);
+    chain.currentBalance = chainBalances.reduce(
       (sum, b) => sum + parseFloat(b.amount), 0
     );
 
@@ -157,6 +157,9 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 
     console.log(`  ${chain.chain}: $${chain.currentBalance} (${excess >= 0 ? '+' : ''}$${excess}) [${status}]`);
   }
+
+  // Return all balances so Step 3 can reuse them without another API call
+  return allBalances;
 }
 ```
 
@@ -165,7 +168,7 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 ### Step 3: Swap to USDC (Optional)
 
 **What this does:**
-- Fetches all token balances from Circle Wallet
+- Receives the balances already fetched in Step 2 — no extra API call
 - Automatically detects any non-USDC tokens with a positive balance
 - Swaps each to USDC on the same chain before bridging
 - Each swap is independent — one failure doesn't stop the rest
@@ -175,13 +178,8 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 - You want a single asset (USDC) flowing into the main treasury
 
 ```typescript
-async function swapToUSDC(): Promise<void> {
-  // Fetch all token balances from Circle Wallet
-  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
-    walletId: process.env.TREASURY_WALLET_ID as string
-  });
-
-  // Filter to non-USDC tokens with a positive balance
+async function swapToUSDC(walletBalances: TokenBalance[]): Promise<void> {
+  // Filter to non-USDC tokens with a positive balance (reuses balances from Step 2)
   const nonUsdcTokens = walletBalances.filter(
     b => b.token !== 'USDC' && parseFloat(b.amount) > 0
   );
@@ -322,18 +320,18 @@ const chainBalances = [
   { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
 ];
 
-// Step 1: Fetch live USDC balances from Circle Wallet
-const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+// Step 1: Fetch all balances once — reused by both Step 1 and Step 2
+const allBalances = await treasuryAdapter.getWalletTokenBalances({
   walletId: process.env.TREASURY_WALLET_ID as string
 });
 
 for (const chain of chainBalances) {
-  const usdcBalance = walletBalances.find(b => b.chain === chain.chain && b.token === 'USDC');
-  chain.currentBalance = usdcBalance ? parseFloat(usdcBalance.amount) : 0;
+  const chainTokens = allBalances.filter(b => b.chain === chain.chain);
+  chain.currentBalance = chainTokens.reduce((sum, b) => sum + parseFloat(b.amount), 0);
 }
 
 // Step 2 (Optional): Detect and swap non-USDC tokens to USDC
-const nonUsdcTokens = walletBalances.filter(b => b.token !== 'USDC' && parseFloat(b.amount) > 0);
+const nonUsdcTokens = allBalances.filter(b => b.token !== 'USDC' && parseFloat(b.amount) > 0);
 for (const holding of nonUsdcTokens) {
   await kit.swap({
     from: { adapter: treasuryAdapter, chain: holding.chain },
@@ -343,6 +341,7 @@ for (const holding of nonUsdcTokens) {
     config: { kitKey: process.env.KIT_KEY as string, slippageBps: 50 }
   });
 }
+
 
 // Step 3: Bridge excess USDC to main treasury
 for (const chain of chainBalances) {
