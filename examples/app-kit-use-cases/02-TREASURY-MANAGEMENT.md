@@ -281,7 +281,19 @@ KIT_KEY=your_kit_key  # Required for swap operations
 import 'dotenv/config';
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
 import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
-// Replace createCircleWalletAdapter with your own wallet provider if needed
+// Note: createCircleWalletAdapter can be replaced with any wallet adapter
+// (e.g., createViemAdapter, createEthersAdapter) depending on your wallet provider.
+
+interface ChainBalance {
+  chain: string;
+  currentBalance: number;
+  targetBalance: number;
+  minimumBalance: number;
+}
+
+const CONSOLIDATION_THRESHOLD = 1000; // Only consolidate if excess > $1,000
+const SLIPPAGE_BPS = 50;              // 0.5% slippage for swaps
+const USE_SLOW_MODE = true;           // SLOW mode = free bridge (no protocol fees)
 
 const kit = new StablecoinKit();
 const treasuryAdapter = createCircleWalletAdapter({
@@ -290,55 +302,131 @@ const treasuryAdapter = createCircleWalletAdapter({
   entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
 });
 
-const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
+const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || '0xYourTreasuryAddress';
 const TREASURY_CHAIN = 'Ethereum';
 
-// Define target and minimum balances per chain
-const chainBalances = [
+async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
+  console.log('\n--- Chain Balances ---');
+
+  const allBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
+
+  for (const chain of chains) {
+    const chainBalances = allBalances.filter(b => b.chain === chain.chain);
+    chain.currentBalance = chainBalances.reduce(
+      (sum, b) => sum + parseFloat(b.amount), 0
+    );
+
+    const excess = chain.currentBalance - chain.targetBalance;
+    const status =
+      chain.currentBalance > chain.targetBalance ? 'EXCESS'
+      : chain.currentBalance < chain.minimumBalance ? 'LOW'
+      : 'OK';
+
+    const delta = excess >= 0 ? `+$${excess.toFixed(0)}` : `-$${Math.abs(excess).toFixed(0)}`;
+    console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(8)}  (target $${chain.targetBalance.toLocaleString()}, ${delta})  [${status}]`);
+  }
+
+  if (swapToUsdc) {
+    await swapToUSDC(allBalances);
+  }
+}
+
+async function swapToUSDC(allBalances: { token: string; chain: string; amount: string }[]): Promise<void> {
+  console.log('\n--- Swapping Tokens to USDC ---');
+
+  const nonUsdcTokens = allBalances.filter(
+    b => b.token !== 'USDC' && parseFloat(b.amount) > 0
+  );
+
+  if (nonUsdcTokens.length === 0) {
+    console.log('  No non-USDC tokens found');
+    return;
+  }
+
+  for (const holding of nonUsdcTokens) {
+    console.log(`\n  Swapping ${holding.amount} ${holding.token} → USDC on ${holding.chain}`);
+
+    try {
+      const result = await kit.swap({
+        from: { adapter: treasuryAdapter, chain: holding.chain },
+        tokenIn: holding.token,
+        tokenOut: 'USDC',
+        amount: holding.amount,
+        config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
+      });
+
+      console.log(`  ✓ Swapped: ${result.txHash}`);
+    } catch (error: any) {
+      console.error(`  ✗ Failed: ${error.message}`);
+    }
+  }
+}
+
+function planConsolidation(chains: ChainBalance[]): { chain: string; amount: string }[] {
+  console.log('\n--- Consolidation Plan ---');
+
+  const operations: { chain: string; amount: string }[] = [];
+
+  for (const chain of chains) {
+    if (chain.chain === TREASURY_CHAIN) continue;
+
+    const excess = chain.currentBalance - chain.targetBalance;
+    const safeToMove = chain.currentBalance - chain.minimumBalance;
+    const amountToMove = Math.min(excess, safeToMove);
+
+    if (amountToMove > CONSOLIDATION_THRESHOLD) {
+      console.log(`  ${chain.chain}: Consolidate $${amountToMove.toFixed(2)} → ${TREASURY_CHAIN}`);
+      operations.push({ chain: chain.chain, amount: amountToMove.toFixed(2) });
+    }
+  }
+
+  return operations;
+}
+
+async function executeConsolidation(
+  operations: { chain: string; amount: string }[]
+): Promise<void> {
+  console.log('\n--- Executing Consolidation ---');
+
+  for (const op of operations) {
+    try {
+      const result = await kit.bridge({
+        from: { adapter: treasuryAdapter, chain: op.chain },
+        to: {
+          adapter: treasuryAdapter,
+          chain: TREASURY_CHAIN,
+          recipientAddress: TREASURY_ADDRESS
+        },
+        amount: op.amount,
+        config: { transferSpeed: USE_SLOW_MODE ? 'SLOW' : 'FAST' }
+      });
+
+      console.log(`  ✓ Bridged $${op.amount} from ${op.chain}: ${result.steps[0].txHash}`);
+    } catch (error: any) {
+      console.error(`  ✗ Failed: ${error.message}`);
+    }
+  }
+}
+
+const chainBalances: ChainBalance[] = [
   { chain: 'Base',     currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
   { chain: 'Arbitrum', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+  { chain: 'Polygon',  currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+  { chain: 'Optimism', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
   { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
 ];
 
-// Step 1: Fetch balances and optionally swap non-USDC tokens to USDC
-const allBalances = await treasuryAdapter.getWalletTokenBalances({
-  walletId: process.env.TREASURY_WALLET_ID as string
-});
+// Step 1: Fetch live balances; pass true to also swap non-USDC tokens to USDC
+await checkChainBalances(chainBalances, /* swapToUsdc */ true);
 
-for (const chain of chainBalances) {
-  const chainTokens = allBalances.filter(b => b.chain === chain.chain);
-  chain.currentBalance = chainTokens.reduce((sum, b) => sum + parseFloat(b.amount), 0);
-}
+// Step 2: Decide what to move
+const operations = planConsolidation(chainBalances);
 
-// Optional: swap non-USDC tokens to USDC using the already-fetched balances
-const nonUsdcTokens = allBalances.filter(b => b.token !== 'USDC' && parseFloat(b.amount) > 0);
-for (const holding of nonUsdcTokens) {
-  await kit.swap({
-    from: { adapter: treasuryAdapter, chain: holding.chain },
-    tokenIn: holding.token,
-    tokenOut: 'USDC',
-    amount: holding.amount,
-    config: { kitKey: process.env.KIT_KEY as string, slippageBps: 50 }
-  });
-}
-
-// Step 2: Bridge excess USDC to main treasury
-for (const chain of chainBalances) {
-  if (chain.chain === TREASURY_CHAIN) continue;
-
-  const excess = chain.currentBalance - chain.targetBalance;
-  const amount = Math.min(excess, chain.currentBalance - chain.minimumBalance);
-
-  if (amount > 1000) {
-    const result = await kit.bridge({
-      from: { adapter: treasuryAdapter, chain: chain.chain },
-      to: { adapter: treasuryAdapter, chain: TREASURY_CHAIN, recipientAddress: TREASURY_ADDRESS },
-      amount: amount.toFixed(2),
-      config: { transferSpeed: 'SLOW' } // Free bridge
-    });
-
-    console.log(`Consolidated $${amount} from ${chain.chain}: ${result.steps[0].txHash}`);
-  }
+if (operations.length > 0) {
+  // Step 3: Execute bridges
+  await executeConsolidation(operations);
 }
 ```
 
