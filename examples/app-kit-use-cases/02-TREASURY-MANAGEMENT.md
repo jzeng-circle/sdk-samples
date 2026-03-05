@@ -121,8 +121,8 @@ const treasuryAdapter = createCircleWalletAdapter({
 ### Step 2: Check Balances
 
 **What this does:**
-- Fetches live token balances from Circle Wallet across all chains
-- Maps the live USDC balance onto each chain's config
+- Fetches all token balances from Circle Wallet per chain
+- Sums all token amounts to get the total balance on each chain
 - Flags chains as EXCESS, LOW, or OK for quick visual audit
 
 **Output:**
@@ -136,17 +136,18 @@ const treasuryAdapter = createCircleWalletAdapter({
 ```
 
 ```typescript
-async function checkChainBalances(chains: ChainBalance[]): Promise<ChainBalance[]> {
-  // Fetch live token balances from Circle Wallet across all chains
-  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
-    walletId: process.env.TREASURY_WALLET_ID as string
-  });
-
+async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
   for (const chain of chains) {
-    const usdcBalance = walletBalances.find(
-      b => b.chain === chain.chain && b.token === 'USDC'
+    // Fetch total balance across all tokens for this chain
+    const balances = await treasuryAdapter.getWalletTokenBalances({
+      walletId: process.env.TREASURY_WALLET_ID as string,
+      chain: chain.chain
+    });
+
+    // Sum all token balances to get the total value on this chain
+    chain.currentBalance = balances.reduce(
+      (sum, b) => sum + parseFloat(b.amount), 0
     );
-    chain.currentBalance = usdcBalance ? parseFloat(usdcBalance.amount) : 0;
 
     const excess = chain.currentBalance - chain.targetBalance;
     const status =
@@ -156,8 +157,6 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<ChainBalance[
 
     console.log(`  ${chain.chain}: $${chain.currentBalance} (${excess >= 0 ? '+' : ''}$${excess}) [${status}]`);
   }
-
-  return chains;
 }
 ```
 
