@@ -30,7 +30,9 @@ An automated treasury management system with these key capabilities:
 - **SLOW mode**: Free transfers — Circle's CCTP charges no protocol fee in slow mode
 - **No contract addresses**: Use token aliases (`USDC`, `USDT`, `DAI`) throughout
 
-> **Note**: This example uses Circle Wallet for managed key custody. Any other wallet adapter (Viem, Ethers, or custom) can be swapped in without changing the treasury logic.
+> **Note**: This example uses Circle Wallet for managed key custody.
+> - Replace `createCircleWalletAdapter` with your own wallet provider (Viem, Ethers, or custom) if needed — the treasury logic stays the same
+> - If using a different wallet provider, replace `getWalletTokenBalances` calls with your provider's equivalent balance-fetching method
 
 **2. Significant Cost Savings Through Automation**
 - SLOW bridge mode costs $0 in protocol fees (vs ~$10 FAST mode per bridge)
@@ -119,8 +121,8 @@ const treasuryAdapter = createCircleWalletAdapter({
 ### Step 2: Check Balances
 
 **What this does:**
-- Iterates over all configured chains
-- Prints current balance, target, and the delta (excess or deficit)
+- Fetches live token balances from Circle Wallet across all chains
+- Maps the live USDC balance onto each chain's config
 - Flags chains as EXCESS, LOW, or OK for quick visual audit
 
 **Output:**
@@ -134,8 +136,18 @@ const treasuryAdapter = createCircleWalletAdapter({
 ```
 
 ```typescript
-async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
+async function checkChainBalances(chains: ChainBalance[]): Promise<ChainBalance[]> {
+  // Fetch live token balances from Circle Wallet across all chains
+  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
+
   for (const chain of chains) {
+    const usdcBalance = walletBalances.find(
+      b => b.chain === chain.chain && b.token === 'USDC'
+    );
+    chain.currentBalance = usdcBalance ? parseFloat(usdcBalance.amount) : 0;
+
     const excess = chain.currentBalance - chain.targetBalance;
     const status =
       chain.currentBalance > chain.targetBalance ? 'EXCESS'
@@ -144,6 +156,8 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 
     console.log(`  ${chain.chain}: $${chain.currentBalance} (${excess >= 0 ? '+' : ''}$${excess}) [${status}]`);
   }
+
+  return chains;
 }
 ```
 
@@ -152,8 +166,9 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 ### Step 3: Swap to USDC (Optional)
 
 **What this does:**
-- Swaps any non-USDC stablecoins (USDT, DAI, etc.) to USDC on the same chain
-- Runs before bridging so that only USDC moves to the treasury
+- Fetches all token balances from Circle Wallet
+- Automatically detects any non-USDC tokens with a positive balance
+- Swaps each to USDC on the same chain before bridging
 - Each swap is independent — one failure doesn't stop the rest
 
 **When to use:**
@@ -161,17 +176,24 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
 - You want a single asset (USDC) flowing into the main treasury
 
 ```typescript
-async function swapToUSDC(holdings: TokenHolding[]): Promise<void> {
-  for (const holding of holdings) {
+async function swapToUSDC(): Promise<void> {
+  // Fetch all token balances from Circle Wallet
+  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
+
+  // Filter to non-USDC tokens with a positive balance
+  const nonUsdcTokens = walletBalances.filter(
+    b => b.token !== 'USDC' && parseFloat(b.amount) > 0
+  );
+
+  for (const holding of nonUsdcTokens) {
     const result = await kit.swap({
       from: { adapter: treasuryAdapter, chain: holding.chain },
       tokenIn: holding.token,
       tokenOut: 'USDC',
       amount: holding.amount,
-      config: {
-        kitKey: process.env.KIT_KEY as string,
-        slippageBps: SLIPPAGE_BPS
-      }
+      config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
     });
 
     console.log(`  ✓ Swapped ${holding.amount} ${holding.token} → USDC on ${holding.chain}: ${result.txHash}`);
@@ -282,6 +304,7 @@ KIT_KEY=your_kit_key  # Required for swap operations
 import 'dotenv/config';
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
 import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
+// Replace createCircleWalletAdapter with your own wallet provider if needed
 
 const kit = new StablecoinKit();
 const treasuryAdapter = createCircleWalletAdapter({
@@ -293,21 +316,26 @@ const treasuryAdapter = createCircleWalletAdapter({
 const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
 const TREASURY_CHAIN = 'Ethereum';
 
-// Define your chain balances and targets (replace with live on-chain reads)
+// Define target and minimum balances per chain
 const chainBalances = [
-  { chain: 'Base',     currentBalance: 15000, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Arbitrum', currentBalance: 12500, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Ethereum', currentBalance: 25000, targetBalance: 50000, minimumBalance: 20000 }
+  { chain: 'Base',     currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+  { chain: 'Arbitrum', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+  { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
 ];
 
-// (Optional) Non-USDC tokens to swap before consolidating
-const nonUsdcHoldings = [
-  { chain: 'Base',     token: 'USDT', amount: '3000' },
-  { chain: 'Arbitrum', token: 'DAI',  amount: '1500' }
-];
+// Step 1: Fetch live USDC balances from Circle Wallet
+const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+  walletId: process.env.TREASURY_WALLET_ID as string
+});
 
-// Step 1: Swap non-USDC to USDC (optional)
-for (const holding of nonUsdcHoldings) {
+for (const chain of chainBalances) {
+  const usdcBalance = walletBalances.find(b => b.chain === chain.chain && b.token === 'USDC');
+  chain.currentBalance = usdcBalance ? parseFloat(usdcBalance.amount) : 0;
+}
+
+// Step 2 (Optional): Detect and swap non-USDC tokens to USDC
+const nonUsdcTokens = walletBalances.filter(b => b.token !== 'USDC' && parseFloat(b.amount) > 0);
+for (const holding of nonUsdcTokens) {
   await kit.swap({
     from: { adapter: treasuryAdapter, chain: holding.chain },
     tokenIn: holding.token,
@@ -317,7 +345,7 @@ for (const holding of nonUsdcHoldings) {
   });
 }
 
-// Step 2: Bridge excess USDC to main treasury
+// Step 3: Bridge excess USDC to main treasury
 for (const chain of chainBalances) {
   if (chain.chain === TREASURY_CHAIN) continue;
 

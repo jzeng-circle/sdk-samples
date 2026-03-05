@@ -13,6 +13,8 @@
 import 'dotenv/config';
 import { StablecoinKit } from '@circle-fin/stablecoin-kit';
 import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
+// Note: createCircleWalletAdapter can be replaced with any wallet adapter
+// (e.g., createViemAdapter, createEthersAdapter) depending on your wallet provider.
 
 // ===========================
 // TYPES
@@ -23,12 +25,6 @@ interface ChainBalance {
   currentBalance: number;
   targetBalance: number;
   minimumBalance: number;
-}
-
-interface TokenHolding {
-  chain: string;
-  token: string;   // Non-USDC token to swap (e.g., 'USDT', 'DAI')
-  amount: string;
 }
 
 // ===========================
@@ -58,10 +54,21 @@ const TREASURY_CHAIN = 'Ethereum';
 // STEP 1: CHECK BALANCES
 // ===========================
 
-async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
+async function checkChainBalances(chains: ChainBalance[]): Promise<ChainBalance[]> {
   console.log('\n--- Chain Balances ---');
 
+  // Fetch live token balances from Circle Wallet across all chains
+  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
+
+  // Map live USDC balances onto the chain config
   for (const chain of chains) {
+    const usdcBalance = walletBalances.find(
+      b => b.chain === chain.chain && b.token === 'USDC'
+    );
+    chain.currentBalance = usdcBalance ? parseFloat(usdcBalance.amount) : 0;
+
     const excess = chain.currentBalance - chain.targetBalance;
     const status =
       chain.currentBalance > chain.targetBalance ? 'EXCESS'
@@ -71,17 +78,34 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<void> {
     const delta = excess >= 0 ? `+$${excess.toFixed(0)}` : `-$${Math.abs(excess).toFixed(0)}`;
     console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(8)}  (target $${chain.targetBalance.toLocaleString()}, ${delta})  [${status}]`);
   }
+
+  return chains;
 }
 
 // ===========================
 // STEP 2: SWAP TO USDC (Optional)
-// Consolidate non-USDC tokens on each chain before bridging
+// Detect any non-USDC tokens in the wallet and swap them to USDC
 // ===========================
 
-async function swapToUSDC(holdings: TokenHolding[]): Promise<void> {
+async function swapToUSDC(): Promise<void> {
   console.log('\n--- Swapping Tokens to USDC ---');
 
-  for (const holding of holdings) {
+  // Fetch all token balances from Circle Wallet
+  const walletBalances = await treasuryAdapter.getWalletTokenBalances({
+    walletId: process.env.TREASURY_WALLET_ID as string
+  });
+
+  // Filter to non-USDC tokens with a positive balance
+  const nonUsdcTokens = walletBalances.filter(
+    b => b.token !== 'USDC' && parseFloat(b.amount) > 0
+  );
+
+  if (nonUsdcTokens.length === 0) {
+    console.log('  No non-USDC tokens found');
+    return;
+  }
+
+  for (const holding of nonUsdcTokens) {
     console.log(`\n  Swapping ${holding.amount} ${holding.token} → USDC on ${holding.chain}`);
 
     try {
@@ -182,28 +206,20 @@ async function runConsolidationJob() {
   console.log(`\n  Run at: ${new Date().toISOString()}`);
   console.log(`  Treasury: ${TREASURY_ADDRESS} on ${TREASURY_CHAIN}`);
 
-  // In production: fetch live balances from each chain
+  // Define target and minimum balances per chain
   const chainBalances: ChainBalance[] = [
-    { chain: 'Base',     currentBalance: 15000, targetBalance: 10000, minimumBalance: 5000 },
-    { chain: 'Arbitrum', currentBalance: 12500, targetBalance: 10000, minimumBalance: 5000 },
-    { chain: 'Polygon',  currentBalance: 8000,  targetBalance: 10000, minimumBalance: 5000 },
-    { chain: 'Optimism', currentBalance: 5500,  targetBalance: 10000, minimumBalance: 5000 },
-    { chain: 'Ethereum', currentBalance: 25000, targetBalance: 50000, minimumBalance: 20000 }
+    { chain: 'Base',     currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+    { chain: 'Arbitrum', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+    { chain: 'Polygon',  currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+    { chain: 'Optimism', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
+    { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
   ];
 
-  // (Optional) Non-USDC tokens sitting in the treasury on each chain
-  const nonUsdcHoldings: TokenHolding[] = [
-    { chain: 'Base',     token: 'USDT', amount: '3000' },
-    { chain: 'Arbitrum', token: 'DAI',  amount: '1500' }
-  ];
-
-  // Step 1: Audit current state
+  // Step 1: Fetch live USDC balances from Circle Wallet
   await checkChainBalances(chainBalances);
 
-  // Step 2 (Optional): Swap any non-USDC tokens to USDC before bridging
-  if (nonUsdcHoldings.length > 0) {
-    await swapToUSDC(nonUsdcHoldings);
-  }
+  // Step 2 (Optional): Detect and swap any non-USDC tokens to USDC before bridging
+  await swapToUSDC();
 
   // Step 3: Decide what to move
   const operations = planConsolidation(chainBalances);
