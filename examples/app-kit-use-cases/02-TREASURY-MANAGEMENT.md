@@ -60,22 +60,20 @@ CHAINS:
 
 FLOW:
 
-Step 1: Check Balances
-    Read USDC balance on Base, Arbitrum, Polygon, Optimism, Ethereum
-    Compare each against target and minimum
+Step 1: Check Balances + Swap to USDC (Optional)
+    Fetch all token balances in one API call
+    Sum per chain and compare against target / minimum
+    [Optional] Base:     USDT $3,000  → USDC  (same chain, 1 swap)
+    [Optional] Arbitrum: DAI  $1,500  → USDC  (same chain, 1 swap)
+    Result:   balances set; all chains now hold only USDC
 
-Step 2: Swap to USDC (Optional)
-    Base:     USDT $3,000  → USDC  (same chain, 1 swap)
-    Arbitrum: DAI  $1,500  → USDC  (same chain, 1 swap)
-    Result:   all chains now hold only USDC
-
-Step 3: Plan Consolidation
-    Base $15k+$3k (target $10k)   → Consolidate $5,000 to Ethereum
+Step 2: Plan Consolidation
+    Base $15k+$3k (target $10k)        → Consolidate $5,000 to Ethereum
     Arbitrum $12.5k+$1.5k (target $10k) → Consolidate $2,500 to Ethereum
-    Polygon $8k (target $10k)     → Skip (deficit, not excess)
-    Optimism $5.5k (target $10k)  → Skip (excess $500 < $1k threshold)
+    Polygon $8k (target $10k)          → Skip (deficit, not excess)
+    Optimism $5.5k (target $10k)       → Skip (excess $500 < $1k threshold)
 
-Step 4: Execute (SLOW bridges, zero protocol fees)
+Step 3: Execute (SLOW bridges, zero protocol fees)
     Base → Ethereum: $5,000 USDC  (1 transaction)
     Arbitrum → Ethereum: $2,500 USDC  (1 transaction)
 
@@ -118,13 +116,12 @@ const treasuryAdapter = createCircleWalletAdapter({
 
 ---
 
-### Step 2: Check Balances
+### Step 2: Check Balances + Swap to USDC (Optional)
 
 **What this does:**
-- Makes a single call to fetch all token balances across all chains
-- Sums balances per chain to get each chain's total value
-- Flags chains as EXCESS, LOW, or OK for quick visual audit
-- Returns the raw balance list so Step 3 can reuse it without another API call
+- Makes a single API call to fetch all token balances across all chains
+- Sums balances per chain and flags each as EXCESS, LOW, or OK
+- Optionally calls `swapToUSDC` using the already-fetched balances — no second API call
 
 **Output:**
 ```
@@ -137,7 +134,7 @@ const treasuryAdapter = createCircleWalletAdapter({
 ```
 
 ```typescript
-async function checkChainBalances(chains: ChainBalance[]): Promise<TokenBalance[]> {
+async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
   // Single call to fetch all token balances across all chains
   const allBalances = await treasuryAdapter.getWalletTokenBalances({
     walletId: process.env.TREASURY_WALLET_ID as string
@@ -148,39 +145,18 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<TokenBalance[
     chain.currentBalance = chainBalances.reduce(
       (sum, b) => sum + parseFloat(b.amount), 0
     );
-
-    const excess = chain.currentBalance - chain.targetBalance;
-    const status =
-      chain.currentBalance > chain.targetBalance ? 'EXCESS'
-      : chain.currentBalance < chain.minimumBalance ? 'LOW'
-      : 'OK';
-
-    console.log(`  ${chain.chain}: $${chain.currentBalance} (${excess >= 0 ? '+' : ''}$${excess}) [${status}]`);
+    // ... log status
   }
 
-  // Return all balances so Step 3 can reuse them without another API call
-  return allBalances;
+  // Optional: swap any non-USDC tokens to USDC using the already-fetched balances
+  if (swapToUsdc) {
+    await swapToUSDC(allBalances);
+  }
 }
-```
 
----
-
-### Step 3: Swap to USDC (Optional)
-
-**What this does:**
-- Receives the balances already fetched in Step 2 — no extra API call
-- Automatically detects any non-USDC tokens with a positive balance
-- Swaps each to USDC on the same chain before bridging
-- Each swap is independent — one failure doesn't stop the rest
-
-**When to use:**
-- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
-- You want a single asset (USDC) flowing into the main treasury
-
-```typescript
-async function swapToUSDC(walletBalances: TokenBalance[]): Promise<void> {
-  // Filter to non-USDC tokens with a positive balance (reuses balances from Step 2)
-  const nonUsdcTokens = walletBalances.filter(
+// Swap any non-USDC tokens to USDC (called from Step 1 when enabled)
+async function swapToUSDC(allBalances: TokenBalance[]): Promise<void> {
+  const nonUsdcTokens = allBalances.filter(
     b => b.token !== 'USDC' && parseFloat(b.amount) > 0
   );
 
@@ -198,9 +174,13 @@ async function swapToUSDC(walletBalances: TokenBalance[]): Promise<void> {
 }
 ```
 
+**When to enable `swapToUsdc`:**
+- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
+- You want a single asset (USDC) flowing into the main treasury
+
 ---
 
-### Step 4: Plan Consolidation
+### Step 3: Plan Consolidation
 
 **What this does:**
 - Skips the main treasury chain
@@ -234,7 +214,7 @@ function planConsolidation(chains: ChainBalance[]): { chain: string; amount: str
 
 ---
 
-### Step 5: Execute Consolidation
+### Step 4: Execute Consolidation
 
 **What this does:**
 - Iterates over planned operations and executes each bridge
@@ -320,7 +300,7 @@ const chainBalances = [
   { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
 ];
 
-// Step 1: Fetch all balances once — reused by both Step 1 and Step 2
+// Step 1: Fetch balances and optionally swap non-USDC tokens to USDC
 const allBalances = await treasuryAdapter.getWalletTokenBalances({
   walletId: process.env.TREASURY_WALLET_ID as string
 });
@@ -330,7 +310,7 @@ for (const chain of chainBalances) {
   chain.currentBalance = chainTokens.reduce((sum, b) => sum + parseFloat(b.amount), 0);
 }
 
-// Step 2 (Optional): Detect and swap non-USDC tokens to USDC
+// Optional: swap non-USDC tokens to USDC using the already-fetched balances
 const nonUsdcTokens = allBalances.filter(b => b.token !== 'USDC' && parseFloat(b.amount) > 0);
 for (const holding of nonUsdcTokens) {
   await kit.swap({
@@ -342,8 +322,7 @@ for (const holding of nonUsdcTokens) {
   });
 }
 
-
-// Step 3: Bridge excess USDC to main treasury
+// Step 2: Bridge excess USDC to main treasury
 for (const chain of chainBalances) {
   if (chain.chain === TREASURY_CHAIN) continue;
 

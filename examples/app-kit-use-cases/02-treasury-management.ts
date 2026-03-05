@@ -2,10 +2,9 @@
  * Multi-Chain Treasury Management
  *
  * Flow:
- * 1. Check USDC balances across all chains
- * 2. (Optional) Swap non-USDC tokens to USDC on each chain
- * 3. Identify chains with excess funds above target
- * 4. Bridge excess to main treasury (SLOW mode for zero fees)
+ * 1. Check balances and optionally swap non-USDC tokens to USDC
+ * 2. Identify chains with excess funds above target
+ * 3. Bridge excess to main treasury (SLOW mode for zero fees)
  *
  * Benefits: Zero bridge fees using SLOW mode, automated scheduling
  */
@@ -51,10 +50,10 @@ const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || '0xYourTreasuryAddress'
 const TREASURY_CHAIN = 'Ethereum';
 
 // ===========================
-// STEP 1: CHECK BALANCES
+// STEP 1: CHECK BALANCES + SWAP TO USDC (Optional)
 // ===========================
 
-async function checkChainBalances(chains: ChainBalance[]): Promise<{ token: string; chain: string; amount: string }[]> {
+async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
   console.log('\n--- Chain Balances ---');
 
   // Single call to fetch all token balances across all chains
@@ -78,20 +77,17 @@ async function checkChainBalances(chains: ChainBalance[]): Promise<{ token: stri
     console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(8)}  (target $${chain.targetBalance.toLocaleString()}, ${delta})  [${status}]`);
   }
 
-  // Return all balances so Step 2 can reuse them without another API call
-  return allBalances;
+  // Optional: swap any non-USDC tokens to USDC using the already-fetched balances
+  if (swapToUsdc) {
+    await swapToUSDC(allBalances);
+  }
 }
 
-// ===========================
-// STEP 2: SWAP TO USDC (Optional)
-// Detect any non-USDC tokens in the wallet and swap them to USDC
-// ===========================
-
-async function swapToUSDC(walletBalances: { token: string; chain: string; amount: string }[]): Promise<void> {
+// Swap any non-USDC tokens to USDC (called from Step 1 when enabled)
+async function swapToUSDC(allBalances: { token: string; chain: string; amount: string }[]): Promise<void> {
   console.log('\n--- Swapping Tokens to USDC ---');
 
-  // Filter to non-USDC tokens with a positive balance (reuses balances from Step 1)
-  const nonUsdcTokens = walletBalances.filter(
+  const nonUsdcTokens = allBalances.filter(
     b => b.token !== 'USDC' && parseFloat(b.amount) > 0
   );
 
@@ -123,7 +119,7 @@ async function swapToUSDC(walletBalances: { token: string; chain: string; amount
 }
 
 // ===========================
-// STEP 3: PLAN CONSOLIDATION
+// STEP 2: PLAN CONSOLIDATION
 // ===========================
 
 function planConsolidation(chains: ChainBalance[]): { chain: string; amount: string }[] {
@@ -157,7 +153,7 @@ function planConsolidation(chains: ChainBalance[]): { chain: string; amount: str
 }
 
 // ===========================
-// STEP 4: EXECUTE CONSOLIDATION
+// STEP 3: EXECUTE CONSOLIDATION
 // ===========================
 
 async function executeConsolidation(
@@ -210,13 +206,10 @@ async function runConsolidationJob() {
     { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
   ];
 
-  // Step 1: Fetch live balances from Circle Wallet (returns all token balances for reuse)
-  const allBalances = await checkChainBalances(chainBalances);
+  // Step 1: Fetch live balances; pass true to also swap non-USDC tokens to USDC
+  await checkChainBalances(chainBalances, /* swapToUsdc */ true);
 
-  // Step 2 (Optional): Detect and swap any non-USDC tokens to USDC before bridging
-  await swapToUSDC(allBalances);
-
-  // Step 3: Decide what to move
+  // Step 2: Decide what to move
   const operations = planConsolidation(chainBalances);
 
   if (operations.length === 0) {
@@ -224,7 +217,7 @@ async function runConsolidationJob() {
     return;
   }
 
-  // Step 4: Execute bridges
+  // Step 3: Execute bridges
   await executeConsolidation(operations);
 
   console.log('\n✓ Treasury consolidation complete');
