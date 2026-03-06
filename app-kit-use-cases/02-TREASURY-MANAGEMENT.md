@@ -2,14 +2,25 @@
 
 ## Business Case
 
-### The Problem
+### Who This Is For
 
-You're managing a company's treasury with USDC spread across multiple blockchains:
-- **Operations** require liquidity on Base, Arbitrum, Polygon, and Optimism
-- **Accounting** needs a consolidated view in one place (Ethereum)
-- **Mixed tokens** — USDT, DAI, and other stablecoins accumulate alongside USDC
-- **Gas fees** stack up fast when bridging manually across 5+ chains, daily
-- **Human error** is inevitable when monitoring balances by hand
+This use case is built for organizations that hold and operate stablecoin balances across multiple blockchains:
+
+- **Corporate treasuries and fintech companies** that receive USDC/USDT inflows across chains and need to consolidate into a single accounting wallet for reporting and compliance
+- **DEX operators and DeFi protocols** that must maintain target liquidity levels per chain to support trading activity while sweeping excess back to a master treasury
+- **DAOs and on-chain organizations** managing operational budgets spread across chains, with a need for automated, auditable fund movements
+- **Multi-chain platforms** (exchanges, lending protocols, yield aggregators) that accumulate stablecoin fees and rewards on many chains and need efficient consolidation without manual intervention
+
+### The Challenges They Face Today
+
+Managing treasury across multiple chains manually is operationally expensive and error-prone:
+
+- **Multi-chain visibility gap**: There is no single place to see the combined balance across Base, Arbitrum, Polygon, Optimism, and Ethereum simultaneously. Teams typically log into multiple explorers or dashboards, copy numbers into spreadsheets, and make consolidation decisions by hand.
+- **On-chain execution complexity**: Bridging USDC from one chain to another requires selecting the right bridge protocol, understanding CCTP attestation flows, handling gas on the source chain, and confirming receipt on the destination — each step requiring separate tooling and failure handling.
+- **Token fragmentation**: Protocols accumulate USDT, DAI, and other stablecoins alongside USDC. Converting them before consolidation requires DEX integration on each chain, with different router contracts, fee tiers, and slippage behavior.
+- **Lack of automation infrastructure**: Without managed wallet infrastructure, treasury operations require a team member to manually sign and broadcast transactions. Automating this safely requires building key management, signing, and execution pipelines from scratch.
+- **Bridge fee drag**: Using FAST bridge modes across multiple chains daily adds up quickly. At $5–$10 per bridge and 4–5 chains, daily consolidation can cost hundreds of dollars per month in protocol fees alone.
+- **Risk of operational error**: Manual treasury operations — wrong amount, wrong destination chain, wrong token — carry real financial risk. A single mistake can result in funds locked on the wrong chain or sent to an incorrect address.
 
 ### The Solution
 

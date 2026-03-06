@@ -2,13 +2,25 @@
 
 ## Business Case
 
-### The Problem
+### Who This Is For
 
-You're building a payment platform where:
-- **Customers** want to pay with various cryptocurrencies (USDT, DAI, ETH, etc.)
-- **Merchants** want to receive stable USDC on their preferred blockchain
-- **Your platform** needs to collect processing fees (e.g., 2.5%)
-- **Gas costs** are expensive when processing each payment individually
+This use case is built for organizations that need to accept cryptocurrency payments at scale and settle to merchants reliably:
+
+- **Payment Service Providers (PSPs)** building crypto payment rails for their merchant network
+- **Large merchants and e-commerce platforms** adding a native crypto checkout alongside existing fiat payment methods
+- **Fintech companies** launching stablecoin-based payment products for business-to-business (B2B) or consumer use cases
+- **Web3-native platforms** (exchanges, marketplaces, DeFi products) that want to accept customer payments in multiple tokens while settling in a single stablecoin
+
+### The Challenges They Face Today
+
+Building this infrastructure from scratch is significantly harder than it appears:
+
+- **Multi-chain complexity**: Customers may send payments from any chain (Ethereum, Base, Arbitrum, Polygon). Supporting multiple chains means deploying and maintaining separate RPC connections, contract integrations, and monitoring logic per chain — multiplying engineering effort with each chain added.
+- **Token fragmentation**: Customers pay with USDT, DAI, USDC, ETH, and other tokens. Converting them to a single settlement asset requires integrating DEX routers (Uniswap, 1inch, etc.) with different ABIs, liquidity pools, and slippage handling per chain.
+- **On-chain operational complexity**: Fee collection, batching, and cross-chain settlement require custom smart contract logic or complex multi-step transaction flows. Errors at any step can result in stuck funds or double payments.
+- **Lack of web3 infrastructure**: Most companies don't have managed wallet infrastructure in-house. Building custodial wallets that can programmatically create per-order wallets, sweep funds, and sign transactions requires significant security and key management investment.
+- **Gas cost management at scale**: Processing each payment as an individual on-chain transaction becomes prohibitively expensive at volume. Without batching, gas costs can exceed the payment value itself for small transactions.
+- **Fragile settlement pipelines**: Bridging funds to a merchant's preferred chain (e.g., USDC on Base) typically involves multiple separate tools and manual steps — swap, then bridge, then send — each with different error modes and no unified retry logic.
 
 ### The Solution
 
