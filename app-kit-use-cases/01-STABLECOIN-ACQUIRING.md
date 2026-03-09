@@ -23,51 +23,29 @@ Stablecoin acquiring is the process of collecting payments from customers who pa
 
 ---
 
-## Wallet & Fund Flow Diagram
+## Fund Flow Diagram
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│              STABLECOIN ACQUIRING - OPTIMIZED FLOW                  │
-│                  (Aggregation + Batch Processing)                   │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+sequenceDiagram
+    participant C as Customer<br/>(USDT · Ethereum)
+    participant T as Temporary Wallet<br/>(per order)
+    participant I as Internal Wallet<br/>(aggregation)
+    participant F as Fee Wallet
+    participant M as Merchant Wallet<br/>(USDC · Base)
 
-WALLETS:
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│   Customer   │  │   Temporary  │  │   Internal   │  │   Merchant   │
-│    Wallet    │  │Payment Wallet│  │    Wallet    │  │    Wallet    │
-│              │  │  (Per Order) │  │ (Aggregation)│  │              │
-│ USDT         │  │ USDT         │  │ USDT, DAI,   │  │ USDC         │
-│ Ethereum     │  │ Ethereum     │  │ USDC         │  │ Base         │
-└──────────────┘  └──────────────┘  └──────────────┘  └──────────────┘
+    Note over C,M: Step 1 — Create Payment Session
+    C->>T: Send $102.50 USDT
 
-FLOW:
+    Note over C,M: Step 2 — Aggregate (immediate)
+    T->>I: Sweep $102.50 USDT
+    Note right of C: Order confirmed ✓
 
-Step 1: Create Payment Session
-    Platform → Create temporary wallet
-    Customer receives payment address
+    Note over C,M: Step 3 — Batch Swap (hourly)
+    I->>I: kit.swap() · USDT → USDC (all orders, 1 tx)
 
-Step 2: Customer Payment
-    Customer → Temporary Wallet ($102.50 USDT)
-    Platform monitors for payment
-
-Step 3: Aggregation (Immediate)
-    Temporary Wallet → Internal Wallet ($102.50 USDT)
-    Customer order confirmed ✓
-
-Step 4: Batch Swap (Hourly)
-    Internal Wallet: All USDT → USDC (ONE transaction)
-    Internal Wallet: All DAI → USDC (ONE transaction)
-    Gas saved: ~80%
-
-Step 5: Settlement (Daily/On-Demand)
-    Internal Wallet → Merchant Wallet ($100 USDC)
-    Internal Wallet → Platform Fee Wallet ($2.50 USDC)
-    Bridge with custom fee (ONE transaction)
-
-FINAL STATE:
-- Customer: Order confirmed immediately ✓
-- Platform: $2.50 fee collected
-- Merchant: $100 USDC received on Base
+    Note over C,M: Step 4 — Settle (daily / on-demand)
+    I->>M: kit.bridge() · $100.00 USDC
+    I->>F: customFee · $2.50 USDC
 ```
 
 ---

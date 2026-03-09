@@ -23,48 +23,30 @@ Multi-chain treasury management is the process of monitoring USDC balances acros
 
 ---
 
-## Wallet & Fund Flow Diagram
+## Fund Flow Diagram
 
-```
-+---------------------------------------------------------------------+
-|           MULTI-CHAIN TREASURY MANAGEMENT - OPTIMIZED FLOW         |
-+---------------------------------------------------------------------+
+```mermaid
+flowchart TD
+    subgraph sources["Step 1 — Check Balances + Swap to USDC (optional)"]
+        B["Base\nUSDT $3,000 + USDC $15,000\ntarget $10k"]
+        A["Arbitrum\nDAI $1,500 + USDC $12,500\ntarget $10k"]
+        P["Polygon\nUSDC $8,000\ntarget $10k"]
+        O["Optimism\nUSDC $5,500\ntarget $10k"]
+    end
 
-CHAINS:
-+--------------+  +--------------+  +--------------+  +--------------+
-|     Base     |  |   Arbitrum   |  |   Polygon    |  |   Optimism   |
-|              |  |              |  |              |  |              |
-| USDT  $3,000 |  | DAI   $1,500 |  | USDC  $8,000 |  | USDC  $5,500 |
-| USDC $15,000 |  | USDC $12,500 |  | target $10k  |  | target $10k  |
-| target $10k  |  | target $10k  |  |              |  |              |
-+--------------+  +--------------+  +--------------+  +--------------+
+    B -->|"kit.swap() USDT → USDC"| B
+    A -->|"kit.swap() DAI → USDC"| A
 
-FLOW:
+    subgraph plan["Step 2 — Plan Consolidation"]
+        B -->|"excess $8k → move $5k\n(keeps $10k minimum)"| T
+        A -->|"excess $4k → move $2.5k\n(keeps $10k minimum)"| T
+        P -.->|"deficit — skip"| P
+        O -.->|"excess $500 < threshold — skip"| O
+    end
 
-Step 1: Check Balances + Swap to USDC (Optional)
-    Fetch all token balances in one API call
-    Sum per chain and compare against target / minimum
-    [Optional] Base:     USDT $3,000  → USDC  (same chain, 1 swap)
-    [Optional] Arbitrum: DAI  $1,500  → USDC  (same chain, 1 swap)
-    Result:   balances set; all chains now hold only USDC
-
-Step 2: Plan Consolidation
-    Base $15k+$3k (target $10k)        → Consolidate $5,000 to Ethereum
-    Arbitrum $12.5k+$1.5k (target $10k) → Consolidate $2,500 to Ethereum
-    Polygon $8k (target $10k)          → Skip (deficit, not excess)
-    Optimism $5.5k (target $10k)       → Skip (excess $500 < $1k threshold)
-
-Step 3: Execute (SLOW bridges, zero protocol fees)
-    Base → Ethereum: $5,000 USDC  (1 transaction)
-    Arbitrum → Ethereum: $2,500 USDC  (1 transaction)
-
-FINAL STATE:
-- Ethereum: $32,500 USDC (closer to $50k target)
-- Base: $10,000 USDC (at target)
-- Arbitrum: $10,000 USDC (at target)
-- Polygon: $8,000 USDC (unchanged)
-- Optimism: $5,500 USDC (unchanged — below threshold)
-- Bridge Fees: $0.00 (SLOW mode)
+    subgraph execute["Step 3 — Execute (SLOW mode, $0 fees)"]
+        T["Treasury\nEthereum\ntarget $50k"]
+    end
 ```
 
 ---
