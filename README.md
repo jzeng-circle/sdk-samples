@@ -1,24 +1,30 @@
 # app-kit-use-cases
 
-Production-ready examples demonstrating real-world stablecoin operations using [Circle App Kit](https://developers.circle.com/app-kit).
+Production-ready TypeScript examples for real-world stablecoin operations using [Circle App Kit](https://developers.circle.com/app-kit).
+
+## About Circle App Kit
+
+Circle App Kit (`@circle-fin/stablecoin-kit`) is a TypeScript SDK for building cross-chain payment and liquidity applications. It exposes three core operations:
+
+- `kit.send()` — transfer tokens between wallets on the same chain
+- `kit.swap()` — exchange one token for another on the same chain (requires `KIT_KEY`)
+- `kit.bridge()` — move USDC across chains via CCTP (`FAST` ~2 block confirmations, `SLOW` ~65 blocks and free)
+
+It works with multiple wallet adapters (Viem, Ethers, Solana, Circle Wallets) and supports 40+ blockchains.
 
 ## Use Cases
 
 ### 01. Stablecoin Acquiring
-Accept payments in any token (USDT, DAI, ETH) and settle stable USDC to merchants on their preferred chain, with built-in platform fee collection.
+Accept payments in any token (USDT, DAI, ETH) from any chain and settle USDC to merchants on their preferred chain, with batch processing and built-in fee collection.
 
-**Read More**: [app-kit-use-cases/01-STABLECOIN-ACQUIRING.md](./app-kit-use-cases/01-STABLECOIN-ACQUIRING.md)
-
----
+- Code: [`app-kit-use-cases/01-stablecoin-acquiring.ts`](./app-kit-use-cases/01-stablecoin-acquiring.ts)
+- Guide: [`app-kit-use-cases/01-STABLECOIN-ACQUIRING.md`](./app-kit-use-cases/01-STABLECOIN-ACQUIRING.md)
 
 ### 02. Multi-Chain Treasury Management
-Consolidate funds from multiple chains to a central treasury. Threshold-based automation, minimum balance protection, and zero bridge fees with SLOW mode.
+Monitor USDC balances across chains and automatically consolidate excess funds to a central treasury using SLOW mode for zero bridge fees.
 
-**Read More**: [app-kit-use-cases/02-TREASURY-MANAGEMENT.md](./app-kit-use-cases/02-TREASURY-MANAGEMENT.md)
-
----
-
-Browse all use cases: [app-kit-use-cases/INDEX.md](./app-kit-use-cases/INDEX.md)
+- Code: [`app-kit-use-cases/02-treasury-management.ts`](./app-kit-use-cases/02-treasury-management.ts)
+- Guide: [`app-kit-use-cases/02-TREASURY-MANAGEMENT.md`](./app-kit-use-cases/02-TREASURY-MANAGEMENT.md)
 
 ## Setup
 
@@ -28,24 +34,7 @@ cp .env.example .env
 # Fill in your credentials in .env
 ```
 
-## Running Examples
-
-```bash
-# Stablecoin acquiring
-npm run app-kit:stablecoin-acquiring
-
-# Treasury management
-npm run app-kit:treasury-management
-
-```
-
-Or run any file directly:
-
-```bash
-npx tsx app-kit-use-cases/01-stablecoin-acquiring.ts
-```
-
-## Environment Variables
+### Environment Variables
 
 | Variable | Description |
 |---|---|
@@ -55,6 +44,20 @@ npx tsx app-kit-use-cases/01-stablecoin-acquiring.ts
 | `TREASURY_WALLET_ID` | Wallet ID for your treasury wallet |
 | `TREASURY_ADDRESS` | On-chain address of your main treasury |
 | `KIT_KEY` | Circle Kit API key (required for swap operations) |
+
+## Running Examples
+
+```bash
+npm run app-kit:stablecoin-acquiring
+npm run app-kit:treasury-management
+```
+
+Or run directly:
+
+```bash
+npx tsx app-kit-use-cases/01-stablecoin-acquiring.ts
+npx tsx app-kit-use-cases/02-treasury-management.ts
+```
 
 ## Resources
 
