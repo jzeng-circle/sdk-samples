@@ -19,8 +19,6 @@ Multi-chain treasury management is the process of monitoring USDC balances acros
 - **Zero-fee bridging with SLOW mode** — uses CCTP's slow path which carries no protocol fee, settling in ~20 minutes
 - **Cron-ready job structure** — the consolidation function runs end-to-end and can be scheduled directly without additional orchestration
 
-> **Note**: This example uses Circle Wallet for managed key custody. Replace `createCircleWalletAdapter` with your own wallet provider (Viem, Ethers, or custom) if needed — the treasury logic stays the same.
-
 ---
 
 ## Fund Flow Diagram
@@ -49,202 +47,66 @@ The distinction that matters here is between a **chain instance** (a balance on 
 
 ---
 
-## Code Walkthrough
+## Choosing Your Adapter
 
-### Step 1: Setup & Configuration
+The SDK calls for swap, bridge, and send are identical regardless of adapter. The key differences are in how you manage keys and how you read balances.
 
-**What this does:**
-- Configures consolidation threshold to filter out micro-movements
-- Sets SLOW mode to eliminate bridge protocol fees
-- Initializes App Kit SDK and Circle Wallet adapter
-- Reads treasury address and chain from environment
-
-```typescript
-import { StablecoinKit } from '@circle-fin/stablecoin-kit';
-import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
-
-const CONSOLIDATION_THRESHOLD = 1000; // Only move if excess > $1,000
-const SLIPPAGE_BPS = 50;              // 0.5% slippage for swaps
-const USE_SLOW_MODE = true;           // Free bridge — no protocol fees
-
-const kit = new StablecoinKit();
-const treasuryAdapter = createCircleWalletAdapter({
-  apiKey: process.env.CIRCLE_API_KEY as string,
-  walletId: process.env.TREASURY_WALLET_ID as string,
-  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
-});
-```
+| | Ethers (v6) | Circle Wallets |
+|---|---|---|
+| **Key management** | You hold and store private keys | Circle manages keys — no private key in your code |
+| **Balance reading** | Direct ERC-20 contract reads via JSON-RPC | Circle API — no RPC node needed |
+| **Best for** | Teams with existing EVM key infrastructure | Enterprises already using Circle Wallets or preferring managed key custody |
 
 ---
 
-### Step 2: Check Balances + Swap to USDC (Optional)
+## Implementation: Ethers Adapter
 
-**What this does:**
-- Makes a single API call to fetch all token balances across all chains
-- Sums balances per chain and flags each as EXCESS, LOW, or OK
-- Optionally calls `swapToUSDC` using the already-fetched balances — no second API call
-
-**Output:**
-```
---- Chain Balances ---
-  Base         $15,000  (target $10,000, +$5,000)  [EXCESS]
-  Arbitrum     $12,500  (target $10,000, +$2,500)  [EXCESS]
-  Polygon       $8,000  (target $10,000, -$2,000)  [OK]
-  Optimism      $5,500  (target $10,000, -$4,500)  [LOW]
-  Ethereum     $25,000  (target $50,000, -$25,000) [OK]
-```
-
-```typescript
-async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
-  // Single call to fetch all token balances across all chains
-  const allBalances = await treasuryAdapter.getWalletTokenBalances({
-    walletId: process.env.TREASURY_WALLET_ID as string
-  });
-
-  for (const chain of chains) {
-    const chainBalances = allBalances.filter(b => b.chain === chain.chain);
-    chain.currentBalance = chainBalances.reduce(
-      (sum, b) => sum + parseFloat(b.amount), 0
-    );
-    // ... log status
-  }
-
-  // Optional: swap any non-USDC tokens to USDC using the already-fetched balances
-  if (swapToUsdc) {
-    await swapToUSDC(allBalances);
-  }
-}
-
-// Swap any non-USDC tokens to USDC (called from Step 1 when enabled)
-async function swapToUSDC(allBalances: TokenBalance[]): Promise<void> {
-  const nonUsdcTokens = allBalances.filter(
-    b => b.token !== 'USDC' && parseFloat(b.amount) > 0
-  );
-
-  for (const holding of nonUsdcTokens) {
-    const result = await kit.swap({
-      from: { adapter: treasuryAdapter, chain: holding.chain },
-      tokenIn: holding.token,
-      tokenOut: 'USDC',
-      amount: holding.amount,
-      config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
-    });
-
-    console.log(`  ✓ Swapped ${holding.amount} ${holding.token} → USDC on ${holding.chain}: ${result.txHash}`);
-  }
-}
-```
-
-**When to enable `swapToUsdc`:**
-- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
-- You want a single asset (USDC) flowing into the main treasury
-
----
-
-### Step 3: Plan Consolidation
-
-**What this does:**
-- Skips the main treasury chain
-- Calculates how much can safely move without breaching minimum balance
-- Applies the threshold filter — skips tiny excess amounts
-- Returns a simple list of `{ chain, amount }` pairs (no bridges executed yet)
-
-**Key protection:** `amountToMove = min(excess, balance - minimum)`
-- Ensures the chain retains its operational floor
-- Safe even when `targetBalance` is lower than `minimumBalance`
-
-```typescript
-function planConsolidation(chains: ChainBalance[]): { chain: string; amount: string }[] {
-  const operations = [];
-
-  for (const chain of chains) {
-    if (chain.chain === TREASURY_CHAIN) continue;
-
-    const excess = chain.currentBalance - chain.targetBalance;
-    const safeToMove = chain.currentBalance - chain.minimumBalance;
-    const amountToMove = Math.min(excess, safeToMove);
-
-    if (amountToMove > CONSOLIDATION_THRESHOLD) {
-      operations.push({ chain: chain.chain, amount: amountToMove.toFixed(2) });
-    }
-  }
-
-  return operations;
-}
-```
-
----
-
-### Step 4: Execute Consolidation
-
-**What this does:**
-- Iterates over planned operations and executes each bridge
-- Uses SLOW mode — Circle's CCTP with no protocol fee
-- Each bridge is independent — one failure doesn't stop the rest
-
-**Note:**
-- SLOW mode settles in ~15-30 minutes (vs seconds for FAST)
-- Ideal for treasury consolidation — you trade speed for zero cost
-
-```typescript
-async function executeConsolidation(
-  operations: { chain: string; amount: string }[]
-): Promise<void> {
-  for (const op of operations) {
-    const result = await kit.bridge({
-      from: { adapter: treasuryAdapter, chain: op.chain },
-      to: {
-        adapter: treasuryAdapter,
-        chain: TREASURY_CHAIN,
-        recipientAddress: TREASURY_ADDRESS
-      },
-      amount: op.amount,
-      config: { transferSpeed: USE_SLOW_MODE ? 'SLOW' : 'FAST' }
-    });
-
-    console.log(`  ✓ Bridged $${op.amount} from ${op.chain}: ${result.steps[0].txHash}`);
-  }
-}
-```
-
----
-
-## Complete Example Script
+Use this if your backend holds private keys directly, or if you use an existing EVM wallet infrastructure (Alchemy, Infura, etc.).
 
 ### Prerequisites
 
 ```bash
-# Install dependencies
-npm install @circle-fin/stablecoin-kit @circle-fin/adapter-circle-wallet dotenv
-
-# Create .env file
-touch .env
+npm install @circle-fin/app-kit @circle-fin/adapter-ethers-v6 ethers dotenv
 ```
-
-### Environment Variables
-
-> **Note**: This example uses Circle Wallet for managed key custody. To get your credentials:
-> - API Key and Entity Secret: [Circle Console](https://console.circle.com/)
-> - Setup guide: [Circle Wallet Quickstart](https://developers.circle.com/w3s/docs/programmable-wallets-quickstart)
 
 ```bash
 # .env
-CIRCLE_API_KEY=your_circle_api_key
-TREASURY_WALLET_ID=your_treasury_wallet_id
-CIRCLE_ENTITY_SECRET=your_entity_secret
+TREASURY_WALLET_KEY=0xYourTreasuryWalletPrivateKey
 TREASURY_ADDRESS=0xYourTreasuryAddress
 KIT_KEY=your_kit_key  # Required for swap operations
+# Optional: bring your own RPC
+ALCHEMY_KEY=your_alchemy_key
 ```
 
-### Full Code
+> The ethers adapter requires you to manage private keys. Store them in a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) in production — never commit them to source control.
+
+### Step 1: Setup
 
 ```typescript
 import 'dotenv/config';
-import { StablecoinKit } from '@circle-fin/stablecoin-kit';
-import { createCircleWalletAdapter } from '@circle-fin/adapter-circle-wallet';
-// Note: createCircleWalletAdapter can be replaced with any wallet adapter
-// (e.g., createViemAdapter, createEthersAdapter) depending on your wallet provider.
+import { AppKit } from '@circle-fin/app-kit';
+import { createEthersAdapterFromPrivateKey } from '@circle-fin/adapter-ethers-v6';
+import { ethers } from 'ethers';
 
+const CONSOLIDATION_THRESHOLD = 1000;
+const SLIPPAGE_BPS = 50;
+const USE_SLOW_MODE = true;
+
+const kit = new AppKit();
+
+const treasuryAdapter = createEthersAdapterFromPrivateKey({
+  privateKey: process.env.TREASURY_WALLET_KEY as string
+});
+
+const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
+const TREASURY_CHAIN = 'Ethereum';
+```
+
+### Step 2: Check Balances
+
+With ethers, balances are read directly from the ERC-20 contract on each chain via JSON-RPC.
+
+```typescript
 interface ChainBalance {
   chain: string;
   currentBalance: number;
@@ -252,33 +114,25 @@ interface ChainBalance {
   minimumBalance: number;
 }
 
-const CONSOLIDATION_THRESHOLD = 1000; // Only consolidate if excess > $1,000
-const SLIPPAGE_BPS = 50;              // 0.5% slippage for swaps
-const USE_SLOW_MODE = true;           // SLOW mode = free bridge (no protocol fees)
+// Contract addresses needed for on-chain balance reads
+const USDC_ADDRESSES: Record<string, string> = {
+  Ethereum: '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48',
+  Base:     '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  Arbitrum: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
+  Polygon:  '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+  Optimism: '0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85',
+};
 
-const kit = new StablecoinKit();
-const treasuryAdapter = createCircleWalletAdapter({
-  apiKey: process.env.CIRCLE_API_KEY as string,
-  walletId: process.env.TREASURY_WALLET_ID as string,
-  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string
-});
-
-const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS || '0xYourTreasuryAddress';
-const TREASURY_CHAIN = 'Ethereum';
+const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
 
 async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
   console.log('\n--- Chain Balances ---');
 
-  // Single call to fetch all token balances across all chains
-  const allBalances = await treasuryAdapter.getWalletTokenBalances({
-    walletId: process.env.TREASURY_WALLET_ID as string
-  });
-
   for (const chain of chains) {
-    const chainBalances = allBalances.filter(b => b.chain === chain.chain);
-    chain.currentBalance = chainBalances.reduce(
-      (sum, b) => sum + parseFloat(b.amount), 0
-    );
+    const provider = new ethers.JsonRpcProvider(/* your RPC URL for this chain */);
+    const contract = new ethers.Contract(USDC_ADDRESSES[chain.chain], ERC20_ABI, provider);
+    const raw: bigint = await contract.balanceOf(TREASURY_ADDRESS);
+    chain.currentBalance = parseFloat(ethers.formatUnits(raw, 6));
 
     const excess = chain.currentBalance - chain.targetBalance;
     const status =
@@ -290,72 +144,56 @@ async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): P
     console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(8)}  (target $${chain.targetBalance.toLocaleString()}, ${delta})  [${status}]`);
   }
 
-  // Optional: swap any non-USDC tokens to USDC using the already-fetched balances
   if (swapToUsdc) {
-    await swapToUSDC(allBalances);
+    await swapNonUsdcToUsdc(chains);
   }
 }
 
-// Swap any non-USDC tokens to USDC (called from Step 1 when enabled)
-async function swapToUSDC(allBalances: { token: string; chain: string; amount: string }[]): Promise<void> {
-  console.log('\n--- Swapping Tokens to USDC ---');
-
-  const nonUsdcTokens = allBalances.filter(
-    b => b.token !== 'USDC' && parseFloat(b.amount) > 0
-  );
-
-  if (nonUsdcTokens.length === 0) {
-    console.log('  No non-USDC tokens found');
-    return;
-  }
-
-  for (const holding of nonUsdcTokens) {
-    console.log(`\n  Swapping ${holding.amount} ${holding.token} → USDC on ${holding.chain}`);
-
-    try {
-      const result = await kit.swap({
-        from: { adapter: treasuryAdapter, chain: holding.chain },
-        tokenIn: holding.token,
-        tokenOut: 'USDC',
-        amount: holding.amount,
-        config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
-      });
-
-      console.log(`  ✓ Swapped: ${result.txHash}`);
-    } catch (error: any) {
-      console.error(`  ✗ Failed: ${error.message}`);
-    }
-  }
+async function swapNonUsdcToUsdc(chains: ChainBalance[]): Promise<void> {
+  // In practice: query each chain for non-USDC balances, then swap
+  // Shown here as a placeholder — same kit.swap() call as Circle Wallet version
 }
+```
 
+### Step 3: Plan Consolidation
+
+This step is adapter-independent — pure logic, no SDK calls.
+
+```typescript
 function planConsolidation(chains: ChainBalance[]): { chain: string; amount: string }[] {
   console.log('\n--- Consolidation Plan ---');
-
   const operations: { chain: string; amount: string }[] = [];
 
   for (const chain of chains) {
     if (chain.chain === TREASURY_CHAIN) continue;
 
     const excess = chain.currentBalance - chain.targetBalance;
-    // Never drain below minimum balance
     const safeToMove = chain.currentBalance - chain.minimumBalance;
     const amountToMove = Math.min(excess, safeToMove);
 
     if (amountToMove > CONSOLIDATION_THRESHOLD) {
       console.log(`  ${chain.chain}: Consolidate $${amountToMove.toFixed(2)} → ${TREASURY_CHAIN}`);
       operations.push({ chain: chain.chain, amount: amountToMove.toFixed(2) });
+    } else {
+      console.log(`  ${chain.chain}: ${excess > 0 ? 'Below threshold' : 'At or below target'} — skip`);
     }
   }
 
   return operations;
 }
+```
 
+### Step 4: Execute Consolidation
+
+```typescript
 async function executeConsolidation(
   operations: { chain: string; amount: string }[]
 ): Promise<void> {
   console.log('\n--- Executing Consolidation ---');
 
   for (const op of operations) {
+    console.log(`\n  Bridging $${op.amount} from ${op.chain} → ${TREASURY_CHAIN}`);
+
     try {
       const result = await kit.bridge({
         from: { adapter: treasuryAdapter, chain: op.chain },
@@ -374,43 +212,238 @@ async function executeConsolidation(
     }
   }
 }
+```
 
-const chainBalances: ChainBalance[] = [
-  { chain: 'Base',     currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Arbitrum', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Polygon',  currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Optimism', currentBalance: 0, targetBalance: 10000, minimumBalance: 5000 },
-  { chain: 'Ethereum', currentBalance: 0, targetBalance: 50000, minimumBalance: 20000 }
-];
+### Run
 
-// Step 1: Fetch live balances; pass true to also swap non-USDC tokens to USDC
-await checkChainBalances(chainBalances, /* swapToUsdc */ true);
+```bash
+npx tsx app-kit-use-cases/02-treasury-management-ethers.ts
+```
 
-// Step 2: Decide what to move
-const operations = planConsolidation(chainBalances);
+---
 
-if (operations.length > 0) {
-  // Step 3: Execute bridges
-  await executeConsolidation(operations);
+## Implementation: Circle Wallets Adapter
+
+Use this if you manage wallets through Circle's developer-controlled wallet service. Circle handles key custody — you interact via API key and entity secret. Balance reads use the Circle API — no RPC node needed.
+
+### Prerequisites
+
+```bash
+npm install @circle-fin/app-kit @circle-fin/adapter-circle-wallets @circle-fin/developer-controlled-wallets dotenv
+```
+
+```bash
+# .env
+CIRCLE_API_KEY=your_circle_api_key
+CIRCLE_ENTITY_SECRET=your_entity_secret
+TREASURY_WALLET_ID=your_treasury_wallet_id
+TREASURY_ADDRESS=0xYourTreasuryAddress
+KIT_KEY=your_kit_key  # Required for swap operations
+```
+
+> Get your Circle credentials at [console.circle.com](https://console.circle.com/). See the [Circle Wallet Quickstart](https://developers.circle.com/w3s/docs/programmable-wallets-quickstart) for wallet setup.
+
+### Step 1: Setup
+
+```typescript
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createCircleWalletsAdapter } from '@circle-fin/adapter-circle-wallets';
+
+const CONSOLIDATION_THRESHOLD = 1000;
+const SLIPPAGE_BPS = 50;
+const USE_SLOW_MODE = true;
+
+const kit = new AppKit();
+
+// A single adapter instance handles all Circle wallets — address is specified per call
+const circleAdapter = createCircleWalletsAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string,
+});
+
+const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
+const TREASURY_WALLET_ID = process.env.TREASURY_WALLET_ID as string;
+const TREASURY_CHAIN = 'Ethereum';
+```
+
+### Step 2: Check Balances + Swap to USDC (Optional)
+
+With Circle Wallets, a single API call returns all token balances across all chains — no per-chain RPC reads.
+
+**Output:**
+```
+--- Chain Balances ---
+  Base         $15,000  (target $10,000, +$5,000)  [EXCESS]
+  Arbitrum     $12,500  (target $10,000, +$2,500)  [EXCESS]
+  Polygon       $8,000  (target $10,000, -$2,000)  [OK]
+  Optimism      $5,500  (target $10,000, -$4,500)  [LOW]
+  Ethereum     $25,000  (target $50,000, -$25,000) [OK]
+```
+
+```typescript
+interface ChainBalance {
+  chain: string;
+  currentBalance: number;
+  targetBalance: number;
+  minimumBalance: number;
+}
+
+async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
+  console.log('\n--- Chain Balances ---');
+
+  const sdk = await circleAdapter.getSdk();
+
+  // Single API call — returns all token balances across all chains
+  const balanceResponse = await sdk.devc.getWalletTokenBalance({ id: TREASURY_WALLET_ID });
+  const allBalances = balanceResponse.data?.tokenBalances ?? [];
+
+  for (const chain of chains) {
+    const chainBalances = allBalances.filter((b: any) => b.token?.blockchain === chain.chain);
+    chain.currentBalance = chainBalances.reduce(
+      (sum: number, b: any) => sum + parseFloat(b.amount ?? '0'), 0
+    );
+
+    const excess = chain.currentBalance - chain.targetBalance;
+    const status =
+      chain.currentBalance > chain.targetBalance ? 'EXCESS'
+      : chain.currentBalance < chain.minimumBalance ? 'LOW'
+      : 'OK';
+
+    const delta = excess >= 0 ? `+$${excess.toFixed(0)}` : `-$${Math.abs(excess).toFixed(0)}`;
+    console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(8)}  (target $${chain.targetBalance.toLocaleString()}, ${delta})  [${status}]`);
+  }
+
+  if (swapToUsdc) {
+    await swapNonUsdcToUsdc(allBalances);
+  }
+}
+
+async function swapNonUsdcToUsdc(allBalances: any[]): Promise<void> {
+  console.log('\n--- Swapping Tokens to USDC ---');
+
+  const nonUsdc = allBalances.filter(
+    (b: any) => b.token?.symbol?.toUpperCase() !== 'USDC' && parseFloat(b.amount ?? '0') > 0
+  );
+
+  if (nonUsdc.length === 0) {
+    console.log('  No non-USDC tokens found');
+    return;
+  }
+
+  for (const holding of nonUsdc) {
+    const chain = holding.token?.blockchain;
+    console.log(`\n  Swapping ${holding.amount} ${holding.token?.symbol} → USDC on ${chain}`);
+
+    try {
+      const result = await kit.swap({
+        from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS },
+        tokenIn: holding.token?.symbol,
+        tokenOut: 'USDC',
+        amountIn: holding.amount,
+        config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
+      });
+
+      console.log(`  ✓ Swapped: ${result.txHash}`);
+    } catch (error: any) {
+      console.error(`  ✗ Failed: ${error.message}`);
+    }
+  }
 }
 ```
 
-### Run the Example
+**When to enable `swapToUsdc`:**
+- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
+- You want a single asset (USDC) flowing into the main treasury
+
+### Step 3: Plan Consolidation
+
+Identical logic to the ethers version — no adapter calls here.
+
+```typescript
+function planConsolidation(chains: ChainBalance[]): { chain: string; amount: string }[] {
+  console.log('\n--- Consolidation Plan ---');
+  const operations: { chain: string; amount: string }[] = [];
+
+  for (const chain of chains) {
+    if (chain.chain === TREASURY_CHAIN) continue;
+
+    const excess = chain.currentBalance - chain.targetBalance;
+    const safeToMove = chain.currentBalance - chain.minimumBalance;
+    const amountToMove = Math.min(excess, safeToMove);
+
+    if (amountToMove > CONSOLIDATION_THRESHOLD) {
+      console.log(`  ${chain.chain}: Consolidate $${amountToMove.toFixed(2)} → ${TREASURY_CHAIN}`);
+      operations.push({ chain: chain.chain, amount: amountToMove.toFixed(2) });
+    } else {
+      console.log(`  ${chain.chain}: ${excess > 0 ? 'Below threshold' : 'At or below target'} — skip`);
+    }
+  }
+
+  return operations;
+}
+```
+
+### Step 4: Execute Consolidation
+
+The `address` field is required in `from` for Circle Wallets. The bridge call is otherwise identical to the ethers version.
+
+```typescript
+async function executeConsolidation(
+  operations: { chain: string; amount: string }[]
+): Promise<void> {
+  console.log('\n--- Executing Consolidation ---');
+
+  for (const op of operations) {
+    console.log(`\n  Bridging $${op.amount} from ${op.chain} → ${TREASURY_CHAIN}`);
+
+    try {
+      const result = await kit.bridge({
+        from: { adapter: circleAdapter, chain: op.chain as any, address: TREASURY_ADDRESS },
+        to: {
+          adapter: circleAdapter,
+          chain: TREASURY_CHAIN as any,
+          address: TREASURY_ADDRESS,
+          recipientAddress: TREASURY_ADDRESS
+        },
+        amount: op.amount,
+        config: { transferSpeed: USE_SLOW_MODE ? 'SLOW' : 'FAST' }
+      });
+
+      console.log(`  ✓ Bridged $${op.amount} from ${op.chain}: ${result.steps[0].txHash}`);
+    } catch (error: any) {
+      console.error(`  ✗ Failed: ${error.message}`);
+    }
+  }
+}
+```
+
+### Run
 
 ```bash
-# Run with tsx
 npm run app-kit:treasury-management
 
 # Or run directly
 npx tsx app-kit-use-cases/02-treasury-management.ts
 ```
 
-### Schedule as a Daily Cron Job
+### Schedule as a Cron Job
 
 ```bash
 # Run at 2 AM every night (low gas hours)
 0 2 * * * cd /your/project && npm run app-kit:treasury-management >> /var/log/treasury.log 2>&1
 ```
+
+---
+
+## Adapter Differences at a Glance
+
+| Step | Ethers | Circle Wallets |
+|---|---|---|
+| **Init adapter** | `createEthersAdapterFromPrivateKey({ privateKey })` | `createCircleWalletsAdapter({ apiKey, entitySecret })` |
+| **Read balances** | ERC-20 `balanceOf` via JSON-RPC per chain | `sdk.devc.getWalletTokenBalance({ id })` — one call, all chains |
+| **from context** | `{ adapter, chain }` | `{ adapter, chain, address }` — address required |
+| **Swap / Bridge** | Identical | Identical |
 
 ---
 
@@ -439,19 +472,16 @@ npx tsx app-kit-use-cases/02-treasury-management.ts
 
 ## Next Steps
 
-1. **Fetch Live Balances**: Replace mock `currentBalance` with live on-chain reads using viem's `readContract` on the USDC token contract
-2. **Database Integration**: Persist transaction hashes for accounting and audit trails
-3. **Alerts**: Notify on Slack/email when a chain goes below `minimumBalance` or when a bridge fails
-4. **Gas Timing**: Check gas prices before running and delay if unusually high
+1. **Database Integration**: Persist transaction hashes for accounting and audit trails
+2. **Alerts**: Notify on Slack/email when a chain goes below `minimumBalance` or when a bridge fails
+3. **Gas Timing**: Check gas prices before running and delay if unusually high
 
 ---
 
 ## Resources
 
 - [Circle App Kit Documentation](https://developers.circle.com/app-kit)
+- [Adapter Setups](https://developers.circle.com/app-kit/adapter-setups)
+- [Circle Wallet Quickstart](https://developers.circle.com/w3s/docs/programmable-wallets-quickstart)
 - [Circle CCTP Documentation](https://developers.circle.com/cctp)
 - [Full Example Code](./02-treasury-management.ts)
-
----
-
-**Questions?** See the integration checklist in the [code comments](./02-treasury-management.ts) or reach out to Circle support.
