@@ -1,0 +1,27 @@
+{
+  "name": "stablecoin-acquiring-circle-wallet",
+  "version": "1.0.0",
+  "description": "Stablecoin acquiring with Circle Wallets adapter",
+  "type": "module",
+  "scripts": {
+    "demo": "tsx src/demo.ts",
+    "test:balance": "tsx src/test-check-balance.ts",
+    "test:send": "tsx src/test-sca-send.ts",
+    "test:bridge": "tsx src/test-sca-bridge.ts",
+    "test:swap": "tsx src/test-sca-swap.ts",
+    "test:all": "tsx src/test-all.ts"
+  },
+  "dependencies": {
+    "@circle-fin/adapter-circle-wallets": "^1.2.8",
+    "@circle-fin/app-kit": "^1.4.2",
+    "@circle-fin/developer-controlled-wallets": "^10.3.1",
+    "@circle-fin/modular-wallets-core": "^1.0.13",
+    "@circle-fin/usdckit": "^0.24.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}
