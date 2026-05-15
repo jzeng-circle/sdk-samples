@@ -1,4 +1,4 @@
-# Multi-Chain Treasury Management with Unified Balance
+# Multi-Chain Treasury Management
 
 ## Business Case
 
