@@ -1,0 +1,23 @@
+{
+  "name": "treasury-management-ethers",
+  "version": "1.0.0",
+  "description": "Multi-chain treasury management with App Kit unified balance, ethers adapter",
+  "type": "module",
+  "scripts": {
+    "demo": "tsx src/demo.ts",
+    "balance": "tsx src/cli-balance.ts",
+    "deposit": "tsx src/cli-deposit.ts",
+    "spend": "tsx src/cli-spend.ts"
+  },
+  "dependencies": {
+    "@circle-fin/app-kit": "^1.5.1",
+    "@circle-fin/adapter-ethers-v6": "^1.6.0",
+    "ethers": "^6.16.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

@@ -1,23 +1,27 @@
-# Multi-Chain Treasury Management
+# Multi-Chain Treasury Management with Unified Balance
 
 ## Business Case
 
-Multi-chain treasury management is the process of keeping USDC balances on operational chains within a defined range, using a central treasury as a reserve. Each chain has an upper bound, a target, and a lower bound. A treasury job runs on a schedule: it reads all balances, then bridges funds in either direction — flushing excess out to the treasury when a chain is over-funded, and drawing funds in from the treasury when a chain runs low. A minimum bridge amount prevents micro-transactions from triggering unnecessary gas spend.
+A multi-chain treasury receives funds on whichever chain a customer or counterparty happens to send from, and needs to deploy those funds on whichever chain the next outflow lives on. The hard part has never been the receive or the send — it is everything between them: tracking what sits on which chain, deciding when to rebalance, swapping non-USDC inflows to USDC, and bridging between chains so the operational wallet always has enough to spend.
+
+App Kit's **Unified Balance** collapses that middle layer. Every USDC deposit, from any chain, lands in a single cross-chain balance backed by Circle's Gateway protocol. When you need to pay out, you spend from that balance on the destination chain and the funds are minted there instantly — no bridge step, no per-chain liquidity to pre-position, no idle capital sitting on the wrong chain.
+
+The result: your only operational work is an EOA wallet on each chain you receive on, a one-time swap to USDC for any non-USDC inflows, and a deposit. After that, the destination chain of an outflow is just a parameter on the spend call.
 
 ### Who This Is For
 
-- **Corporate treasuries** — automatically keeping each chain's operational balance within a defined band, with a central reserve handling both top-ups and sweeps
-- **DAOs and multi-chain platforms** — preventing any chain from running dry or accumulating idle capital without manual intervention
-- **DEX operators and DeFi protocols** — maintaining per-chain USDC ratios to support liquidity operations
+- **Corporate treasuries** — receiving customer/partner payments across many chains and paying out vendors, payroll, or settlements wherever they sit
+- **DAOs and multi-chain platforms** — eliminating idle per-chain reserves and the rebalancing job that maintains them
+- **Cross-chain payment platforms** — accepting inflows on any chain and paying out instantly on any other, without bridging in the hot path
 
 ### Key Features
 
-- **Single-call balance snapshot** — fetch all token balances across all chains in one API call, no per-chain polling
-- **Bidirectional rebalancing** — bridges excess out to the treasury when a chain exceeds its upper bound, and draws funds in from the treasury when a chain falls below its lower bound
-- **Optional token normalization** — swap any non-USDC tokens to USDC on each chain before rebalancing, keeping the treasury in a single asset
-- **Minimum bridge amount** — skips rebalancing when the difference is below a configurable floor, avoiding micro-transactions that cost more in gas than they move
-- **Zero-fee bridging with SLOW mode** — uses CCTP's slow path which carries no protocol fee, settling in ~15-30 minutes
-- **Cron-ready job structure** — the rebalancing function runs end-to-end and can be scheduled directly without additional orchestration
+- **One USDC balance across all chains** — `kit.unifiedBalance.getBalances()` returns a single aggregated total plus per-chain breakdown; no manual ledger to maintain
+- **Instant cross-chain spend** — `kit.unifiedBalance.spend()` mints USDC on the destination chain in a single call, no bridge wait, no FAST/SLOW tradeoff
+- **No rebalancing job** — Gateway is the rebalancer; you stop running upper/lower bound checks, scheduled sweeps, or cron-triggered top-ups
+- **Receive on EOA, deposit on EOA** — no smart contract wallet required; the same private key signs deposits and spends across every supported chain
+- **Optional swap-first normalization** — `kit.swap()` converts USDT/DAI/PYUSD/etc. inflows to USDC before deposit, so a single asset funds the unified balance
+- **Fee estimation up front** — `kit.unifiedBalance.estimateSpend()` returns fees before the spend so you can preview cost per payout
 
 ---
 
@@ -25,43 +29,52 @@ Multi-chain treasury management is the process of keeping USDC balances on opera
 
 ```mermaid
 flowchart LR
-    B["Base\nUSDC $1,800\ntarget $1,000"]
-    A["Arbitrum\nUSDC $350\ntarget $1,000"]
-    P["Polygon\nUSDC $980\ntarget $1,000"]
-    T["Treasury\nOptimism"]
+    IN_ETH["Ethereum Sepolia<br/>inflow: USDC"]
+    IN_BASE["Base Sepolia<br/>inflow: USDC"]
+    IN_ARC["Arc Testnet<br/>inflow: EURC/USDC"]
 
-    B -->|"$800 out · SLOW · $0"| T
-    T -->|"$650 in · SLOW · $0"| A
-    P -. "diff $20 below min $100 · skip" .- T
+    SWAP["kit.swap()<br/>EURC → USDC"]
+
+    DEP_ETH["kit.unifiedBalance.deposit()"]
+    DEP_BASE["kit.unifiedBalance.deposit()"]
+    DEP_ARC["kit.unifiedBalance.deposit()"]
+
+    UB[("Unified Balance<br/>(Gateway)<br/>$10,000")]
+
+    OUT_BASE["Spend on Base Sepolia<br/>$1,500 → vendor"]
+    OUT_ARC["Spend on Arc Testnet<br/>$3,000 → payroll"]
+    OUT_AVAX["Spend on Avalanche Fuji<br/>$500 → partner"]
+
+    IN_ETH --> DEP_ETH
+    IN_BASE --> DEP_BASE
+    IN_ARC -->|"non-USDC only"| SWAP
+    SWAP --> DEP_ARC
+    IN_ARC -.->|"USDC: skip swap"| DEP_ARC
+
+    DEP_ETH --> UB
+    DEP_BASE --> UB
+    DEP_ARC --> UB
+
+    UB --> OUT_BASE
+    UB --> OUT_ARC
+    UB --> OUT_AVAX
 ```
 
-Each operational chain has an **upper bound** ($1,500), a **target** ($1,000), and a **lower bound** ($500). When a chain's balance exceeds the upper bound, the excess is bridged out to the Optimism treasury. When it falls below the lower bound, the deficit is drawn in from the treasury. Rebalancing is skipped when the difference is less than the minimum bridge amount ($100) — Polygon's $20 imbalance in this example is below that floor.
+Inflows arrive on whichever chains your customers or counterparties send from. Any non-USDC token is swapped to USDC on the same chain, then `deposit()` credits the unified balance. In this testnet example, Arc Testnet is where the swap step lives — App Kit currently supports the EURC ↔ USDC pair on Arc Testnet for swap. From that point on, the destination chain of an outflow is just a parameter — `spend()` mints USDC on Base Sepolia, Arc Testnet, Avalanche Fuji, or any other Gateway-supported chain instantly, regardless of which chain the funds were deposited from.
 
 ### Wallets in This Flow
 
-This use case uses a single wallet, but it operates on multiple chains simultaneously.
+This use case uses a single wallet identity (one private key, or one Circle wallet) that operates as an EOA on every chain you receive or pay out on. There are no per-chain wallets to provision and no smart-contract wallets to deploy.
 
-- **Treasury Wallet (per-chain instances)** — one set of credentials (`TREASURY_WALLET_ID`) controls balances on Base, Arbitrum, and Polygon. Each chain has its own balance with an upper bound, target, and lower bound. The Optimism instance is the central reserve: over-funded chains bridge excess to it, and under-funded chains draw from it. The wallet does not change — only which chain it is acting on changes per operation.
+- **Treasury Wallet (single EOA, multi-chain)** — receives inflows, signs swaps to USDC, signs deposits into the unified balance, and signs spends out to vendors. Because the unified balance is keyed to the depositor address, every chain shares the same balance view automatically.
 
-The distinction that matters here is between a **chain instance** (a balance on a specific chain) and the **wallet itself** (the single entity you authenticate as). App Kit handles routing to the correct chain based on the `chain` field you pass to `kit.bridge()` — you do not manage separate credentials per chain.
-
----
-
-## Choosing Your Adapter
-
-The SDK calls for swap, bridge, and send are identical regardless of adapter. The key differences are in how you manage keys and how you read balances.
-
-| | Ethers (v6) | Circle Wallets |
-|---|---|---|
-| **Key management** | You hold and store private keys | Circle manages keys — no private key in your code |
-| **Balance reading** | Direct ERC-20 contract reads via JSON-RPC | Circle API — no RPC node needed |
-| **Best for** | Teams with existing EVM key infrastructure | Enterprises already using Circle Wallets or preferring managed key custody |
+The distinction that matters here is between a **chain context** (the chain field you pass to a method) and the **wallet itself** (the single signing identity). App Kit routes each call to the correct chain based on the `chain` field — you do not manage separate credentials per chain.
 
 ---
 
 ## Implementation: Ethers Adapter
 
-Use this if your backend holds private keys directly, or if you use an existing EVM wallet infrastructure (Alchemy, Infura, etc.).
+Use this if your backend holds private keys directly, or if you already use an EVM wallet infrastructure (Alchemy, Infura, etc.).
 
 ### Prerequisites
 
@@ -74,8 +87,6 @@ npm install @circle-fin/app-kit @circle-fin/adapter-ethers-v6 ethers dotenv
 TREASURY_WALLET_KEY=0xYourTreasuryWalletPrivateKey
 TREASURY_ADDRESS=0xYourTreasuryAddress
 KIT_KEY=your_kit_key  # Required for swap operations
-# Optional: bring your own RPC
-ALCHEMY_KEY=your_alchemy_key
 ```
 
 > The ethers adapter requires you to manage private keys. Store them in a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) in production — never commit them to source control.
@@ -86,225 +97,451 @@ ALCHEMY_KEY=your_alchemy_key
 import 'dotenv/config';
 import { AppKit } from '@circle-fin/app-kit';
 import { createEthersAdapterFromPrivateKey } from '@circle-fin/adapter-ethers-v6';
-import { ethers } from 'ethers';
 
-const MIN_BRIDGE_AMOUNT = 100; // Skip rebalancing when difference is below this amount
-const SLIPPAGE_BPS = 50;       // Max swap slippage (50 = 0.5%)
-const USE_SLOW_MODE = true;    // SLOW = free CCTP bridge, settles in ~15-30 min
+const SLIPPAGE_BPS = 50; // Max swap slippage (50 = 0.5%)
 
 const kit = new AppKit();
 
 // Signs transactions with your private key — load from a secrets manager in production
 const treasuryAdapter = createEthersAdapterFromPrivateKey({
-  privateKey: process.env.TREASURY_WALLET_KEY as string
+  privateKey: process.env.TREASURY_WALLET_KEY as string,
 });
 
 const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
-const TREASURY_CHAIN = 'Optimism'; // Central reserve — absorbs excess and funds top-ups
+
+// Receive chains. The treasury holds an EOA on each.
+// Outflows can target any Gateway-supported chain, not just these.
+const RECEIVE_CHAINS = ['Ethereum_Sepolia', 'Base_Sepolia', 'Arc_Testnet'] as const;
 ```
 
-### Step 2: Check Balances + Swap to USDC (Optional)
+### Step 2: Check the Unified Balance
 
-With ethers, balances are read directly from the ERC-20 contract on each chain via JSON-RPC.
+A single call returns the unified USDC balance and the per-chain breakdown — no per-chain RPC reads, no contract calls.
 
 **Output:**
 ```
---- Chain Balances ---
-  Base         $1,800  (target $1,000, upper $1,500)  [OVER]
-  Arbitrum       $350  (target $1,000, lower   $500)  [UNDER]
-  Polygon        $980  (target $1,000)                [OK]
+--- Unified Balance ---
+  Total confirmed:  $10,000.00
+    Ethereum_Sepolia $4,500.00
+    Base_Sepolia     $3,500.00
+    Arc_Testnet      $2,000.00
+  Pending deposits: $0.00
 ```
 
 ```typescript
-interface ChainBalance {
-  chain: string;
-  currentBalance: number;
-  upperBound: number;    // Bridge excess out when balance exceeds this
-  targetBalance: number; // Restore to this level when rebalancing in either direction
-  lowerBound: number;    // Draw funds in when balance falls below this
-}
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
 
-// Required for on-chain balance reads — App Kit uses token aliases for kit.swap/bridge/send
-// but direct ERC-20 reads need the actual contract address
-const USDC_ADDRESSES: Record<string, string> = {
-  Base:     '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
-  Arbitrum: '0xaf88d065e77c8cc2239327c5edb3a432268e5831',
-  Polygon:  '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: treasuryAdapter },
+    includePending: true,
+  });
+
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+```
+
+### Step 3: Normalize Inflows (Optional Swap to USDC)
+
+Run this only when a receive chain holds non-USDC stablecoins. Skip it entirely if every inflow is already USDC.
+
+In this testnet example the only supported swap pair is **EURC → USDC on Arc Testnet** — App Kit currently exposes EURC ↔ USDC liquidity on Arc Testnet. Ethereum Sepolia and Base Sepolia are USDC-only here.
+
+```typescript
+// Non-USDC tokens you accept on each chain. Extend as needed.
+// On testnet, swap is only wired up for EURC ↔ USDC on Arc Testnet.
+const NON_USDC_INFLOWS: Record<string, string[]> = {
+  Ethereum_Sepolia: [],         // USDC-only
+  Base_Sepolia:     [],         // USDC-only
+  Arc_Testnet:      ['EURC'],   // swap EURC → USDC before deposit
 };
 
-const ERC20_ABI = ['function balanceOf(address) view returns (uint256)'];
+async function swapInflowsToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
 
-// Non-USDC token addresses for swap reads — extend as needed
-const NON_USDC_ADDRESSES: Record<string, { symbol: string; address: string }[]> = {
-  Base:     [{ symbol: 'USDT', address: '0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2' }],
-  Arbitrum: [{ symbol: 'USDT', address: '0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9' }],
-  Polygon:  [{ symbol: 'USDT', address: '0xc2132d05d31c914a87c6611c10748aeb04b58e8f' }],
+  const result = await kit.swap({
+    from: { adapter: treasuryAdapter, chain },
+    tokenIn,                 // 'EURC' on Arc Testnet
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
+
+  console.log(`  ✓ Swapped: ${result.txHash}`);
+}
+```
+
+**When to run a swap:**
+- A non-USDC token (in this testnet flow, EURC on Arc Testnet) arrived in the treasury wallet
+- You want the unified balance to be USDC-denominated (it is — Gateway is USDC-only)
+
+### Step 4: Deposit into the Unified Balance
+
+After any swap step (or directly, if the inflow is already USDC), deposit on the receive chain. The credit is keyed to the depositor address, so the funds become spendable on every Gateway chain.
+
+```typescript
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
+
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: treasuryAdapter, chain },
+    amount,
+  });
+
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+```
+
+### Step 5: Spend Instantly on Any Chain
+
+A spend mints USDC on the destination chain immediately. The destination does not need to be a chain you received on — it can be any Gateway-supported chain.
+
+```typescript
+async function payout(
+  destinationChain: string,
+  amount: string,
+  recipientAddress: string,
+): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  // Optional: preview the fee before committing
+  const estimate = await kit.unifiedBalance.estimateSpend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  Estimated fee: $${estimate.fees?.[0]?.amount ?? '0'}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+```
+
+You only specify the destination — there is no per-chain allocation to plan, and you do not need to know which deposit chain your USDC currently lives on. The unified balance is one pool from the caller's perspective; Gateway handles sourcing.
+
+### Complete Example
+
+Save the snippet below as `treasury.ts`, fill in the `.env` values from the Prerequisites section and the `RECIPIENT_ADDRESS` constant in the file.
+
+```typescript
+// treasury.ts
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createEthersAdapterFromPrivateKey } from '@circle-fin/adapter-ethers-v6';
+
+const SLIPPAGE_BPS = 50;
+const RECIPIENT_ADDRESS = '0xRecipientAddress'; // ← who you are paying out to
+
+const kit = new AppKit();
+
+const treasuryAdapter = createEthersAdapterFromPrivateKey({
+  privateKey: process.env.TREASURY_WALLET_KEY as string,
+});
+
+// Non-USDC tokens you accept on each receive chain. Triggers a swap before deposit.
+// On testnet, App Kit currently exposes the EURC ↔ USDC pair on Arc Testnet only.
+const NON_USDC_INFLOWS: Record<string, string[]> = {
+  Ethereum_Sepolia: [],
+  Base_Sepolia:     [],
+  Arc_Testnet:      ['EURC'],
 };
 
-async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
-  console.log('\n--- Chain Balances ---');
-
-  for (const chain of chains) {
-    const provider = new ethers.JsonRpcProvider(/* your RPC URL for this chain */);
-    const contract = new ethers.Contract(USDC_ADDRESSES[chain.chain], ERC20_ABI, provider);
-    const raw: bigint = await contract.balanceOf(TREASURY_ADDRESS);
-    chain.currentBalance = parseFloat(ethers.formatUnits(raw, 6)); // USDC has 6 decimals
-
-    const status =
-      chain.currentBalance > chain.upperBound ? 'OVER'
-      : chain.currentBalance < chain.lowerBound ? 'UNDER'
-      : 'OK';
-
-    const hint = status === 'OVER'
-      ? `, upper $${chain.upperBound.toLocaleString()}`
-      : status === 'UNDER'
-      ? `, lower $${chain.lowerBound.toLocaleString()}`
-      : '';
-    console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(6)}  (target $${chain.targetBalance.toLocaleString()}${hint})  [${status}]`);
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: treasuryAdapter },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
   }
-
-  if (swapToUsdc) { // Enable when treasury holds non-USDC tokens
-    await swapNonUsdcToUsdc(chains);
-  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
 }
 
-async function swapNonUsdcToUsdc(chains: ChainBalance[]): Promise<void> {
-  console.log('\n--- Swapping Tokens to USDC ---');
-
-  for (const chain of chains) {
-    const tokens = NON_USDC_ADDRESSES[chain.chain] ?? [];
-    const provider = new ethers.JsonRpcProvider(/* your RPC URL for this chain */);
-
-    for (const token of tokens) {
-      const contract = new ethers.Contract(token.address, ERC20_ABI, provider);
-      const raw: bigint = await contract.balanceOf(TREASURY_ADDRESS);
-      const amount = parseFloat(ethers.formatUnits(raw, 6));
-
-      if (amount === 0) continue;
-
-      console.log(`\n  Swapping ${amount} ${token.symbol} → USDC on ${chain.chain}`);
-
-      try {
-        const result = await kit.swap({
-          from: { adapter: treasuryAdapter, chain: chain.chain },
-          tokenIn: token.symbol,
-          tokenOut: 'USDC',
-          amountIn: amount.toFixed(6),
-          // kitKey is required for swaps — separate from your ethers private key
-          config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
-        });
-
-        console.log(`  ✓ Swapped: ${result.txHash}`);
-      } catch (error: any) {
-        console.error(`  ✗ Failed: ${error.message}`);
-      }
-    }
-  }
+async function swapInflowToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
+  const result = await kit.swap({
+    from: { adapter: treasuryAdapter, chain },
+    tokenIn,
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
+  console.log(`  ✓ Swapped: ${result.txHash}`);
 }
+
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: treasuryAdapter, chain },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+
+async function payout(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const estimate = await kit.unifiedBalance.estimateSpend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  Estimated fee: $${estimate.fees?.[0]?.amount ?? '0'}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+
+async function main() {
+  await checkUnifiedBalance();
+
+  // Inbound: receive 100 EURC on Arc Testnet, swap to USDC, deposit into the unified balance
+  await swapInflowToUsdc('Arc_Testnet', '100', 'EURC');
+  await depositToUnifiedBalance('Arc_Testnet', '100');
+
+  // Outbound: pay a vendor 50 USDC on Base Sepolia — minted instantly via Gateway
+  await payout('Base_Sepolia', '50', RECIPIENT_ADDRESS);
+
+  await checkUnifiedBalance();
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 ```
 
-**When to enable `swapToUsdc`:**
-- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
-- You want a single asset (USDC) flowing into the main treasury
-
-### Step 3: Plan Rebalancing
-
-This step is adapter-independent — pure logic, no SDK calls.
-
-```typescript
-type Direction = 'OUT' | 'IN'; // OUT = bridge to treasury, IN = draw from treasury
-
-interface RebalanceOp {
-  chain: string;
-  direction: Direction;
-  amount: string;
-}
-
-function planRebalancing(chains: ChainBalance[]): RebalanceOp[] {
-  console.log('\n--- Rebalancing Plan ---');
-  const operations: RebalanceOp[] = [];
-
-  for (const chain of chains) {
-    if (chain.chain === TREASURY_CHAIN) continue; // Treasury chain — skip
-
-    if (chain.currentBalance > chain.upperBound) {
-      // Over upper bound — bridge excess back to target
-      const amount = chain.currentBalance - chain.targetBalance;
-      if (amount >= MIN_BRIDGE_AMOUNT) {
-        console.log(`  ${chain.chain}: OVER — bridge $${amount.toFixed(2)} out to ${TREASURY_CHAIN}`);
-        operations.push({ chain: chain.chain, direction: 'OUT', amount: amount.toFixed(2) });
-      } else {
-        console.log(`  ${chain.chain}: OVER but diff $${amount.toFixed(2)} < min $${MIN_BRIDGE_AMOUNT} — skip`);
-      }
-    } else if (chain.currentBalance < chain.lowerBound) {
-      // Below lower bound — draw from treasury to restore target
-      const amount = chain.targetBalance - chain.currentBalance;
-      if (amount >= MIN_BRIDGE_AMOUNT) {
-        console.log(`  ${chain.chain}: UNDER — draw $${amount.toFixed(2)} in from ${TREASURY_CHAIN}`);
-        operations.push({ chain: chain.chain, direction: 'IN', amount: amount.toFixed(2) });
-      } else {
-        console.log(`  ${chain.chain}: UNDER but diff $${amount.toFixed(2)} < min $${MIN_BRIDGE_AMOUNT} — skip`);
-      }
-    } else {
-      const diff = Math.abs(chain.currentBalance - chain.targetBalance);
-      console.log(`  ${chain.chain}: OK — diff $${diff.toFixed(2)} within bounds — skip`);
-    }
-  }
-
-  return operations;
-}
-```
-
-### Step 4: Execute Rebalancing
-
-Bridge each planned operation using SLOW mode for zero protocol fees.
-
-```typescript
-async function executeRebalancing(operations: RebalanceOp[]): Promise<void> {
-  console.log('\n--- Executing Rebalancing ---');
-
-  for (const op of operations) {
-    const label = op.direction === 'OUT'
-      ? `${op.chain} → ${TREASURY_CHAIN}`
-      : `${TREASURY_CHAIN} → ${op.chain}`;
-    console.log(`\n  Bridging $${op.amount}: ${label}`);
-
-    try {
-      const result = await kit.bridge({
-        from: {
-          adapter: treasuryAdapter,
-          chain: op.direction === 'OUT' ? op.chain : TREASURY_CHAIN
-        },
-        to: {
-          adapter: treasuryAdapter,
-          chain: op.direction === 'OUT' ? TREASURY_CHAIN : op.chain,
-          // Ensures USDC is minted to the treasury address, not the adapter's default
-          recipientAddress: TREASURY_ADDRESS
-        },
-        amount: op.amount,
-        config: { transferSpeed: USE_SLOW_MODE ? 'SLOW' : 'FAST' } // SLOW = free, FAST = ~$10
-      });
-
-      console.log(`  ✓ Bridged: ${result.steps[0].txHash}`);
-    } catch (error: any) {
-      // Catch per-operation so one failure doesn't abort the rest
-      console.error(`  ✗ Failed: ${error.message}`);
-    }
-  }
-}
-```
-
-### Run
+Run it:
 
 ```bash
-npx tsx app-kit-use-cases/02-treasury-management-ethers.ts
+npx tsx treasury.ts
+```
+
+---
+
+## Implementation: Viem Adapter
+
+Use this if your backend signs transactions with viem. The flow is identical to ethers — only the adapter factory and types differ.
+
+### Prerequisites
+
+```bash
+npm install @circle-fin/app-kit @circle-fin/adapter-viem-v2 viem dotenv
+```
+
+```bash
+# .env
+TREASURY_WALLET_KEY=0xYourTreasuryWalletPrivateKey
+TREASURY_ADDRESS=0xYourTreasuryAddress
+KIT_KEY=your_kit_key  # Required for swap operations
+```
+
+> The viem adapter requires you to manage private keys. Store them in a secrets manager (AWS Secrets Manager, HashiCorp Vault, etc.) in production — never commit them to source control.
+
+### Step 1: Setup
+
+```typescript
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+
+const SLIPPAGE_BPS = 50;
+
+const kit = new AppKit();
+
+// Signs transactions with your private key — load from a secrets manager in production
+const treasuryAdapter = createViemAdapterFromPrivateKey({
+  privateKey: process.env.TREASURY_WALLET_KEY as `0x${string}`,
+});
+
+const RECEIVE_CHAINS = ['Ethereum_Sepolia', 'Base_Sepolia', 'Arc_Testnet'] as const;
+```
+
+### Step 2: Check the Unified Balance
+
+```typescript
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: treasuryAdapter },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+```
+
+### Step 3: Normalize Inflows (Optional Swap to USDC)
+
+In this testnet flow the only configured swap pair is **EURC → USDC on Arc Testnet**.
+
+```typescript
+async function swapInflowToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
+  const result = await kit.swap({
+    from: { adapter: treasuryAdapter, chain },
+    tokenIn,
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
+  console.log(`  ✓ Swapped: ${result.txHash}`);
+}
+```
+
+### Step 4: Deposit into the Unified Balance
+
+```typescript
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: treasuryAdapter, chain },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+```
+
+### Step 5: Spend Instantly on Any Chain
+
+```typescript
+async function payout(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+```
+
+### Complete Example
+
+Save the snippet below as `treasury.ts`, fill in the `.env` values from the Prerequisites section and the `RECIPIENT_ADDRESS` constant in the file.
+
+```typescript
+// treasury.ts
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+
+const SLIPPAGE_BPS = 50;
+const RECIPIENT_ADDRESS = '0xRecipientAddress'; // ← who you are paying out to
+
+const kit = new AppKit();
+
+const treasuryAdapter = createViemAdapterFromPrivateKey({
+  privateKey: process.env.TREASURY_WALLET_KEY as `0x${string}`,
+});
+
+const NON_USDC_INFLOWS: Record<string, string[]> = {
+  Ethereum_Sepolia: [],
+  Base_Sepolia:     [],
+  Arc_Testnet:      ['EURC'],
+};
+
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: treasuryAdapter },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+
+async function swapInflowToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
+  const result = await kit.swap({
+    from: { adapter: treasuryAdapter, chain },
+    tokenIn,
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
+  console.log(`  ✓ Swapped: ${result.txHash}`);
+}
+
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: treasuryAdapter, chain },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+
+async function payout(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const estimate = await kit.unifiedBalance.estimateSpend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  Estimated fee: $${estimate.fees?.[0]?.amount ?? '0'}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: treasuryAdapter },
+    to: { adapter: treasuryAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+
+async function main() {
+  await checkUnifiedBalance();
+
+  // Inbound: receive 100 EURC on Arc Testnet, swap to USDC, deposit into the unified balance
+  await swapInflowToUsdc('Arc_Testnet', '100', 'EURC');
+  await depositToUnifiedBalance('Arc_Testnet', '100');
+
+  // Outbound: pay a vendor 50 USDC on Base Sepolia — minted instantly via Gateway
+  await payout('Base_Sepolia', '50', RECIPIENT_ADDRESS);
+
+  await checkUnifiedBalance();
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+```
+
+Run it:
+
+```bash
+npx tsx treasury.ts
 ```
 
 ---
 
 ## Implementation: Circle Wallets Adapter
 
-Use this if you manage wallets through Circle's developer-controlled wallet service. Circle handles key custody — you interact via API key and entity secret. Balance reads use the Circle API — no RPC node needed.
+Use this if you manage wallets through Circle's developer-controlled wallet service. Circle handles key custody — you authenticate via API key and entity secret.
 
 ### Prerequisites
 
@@ -330,264 +567,394 @@ import 'dotenv/config';
 import { AppKit } from '@circle-fin/app-kit';
 import { createCircleWalletsAdapter } from '@circle-fin/adapter-circle-wallets';
 
-const MIN_BRIDGE_AMOUNT = 100; // Skip rebalancing when difference is below this amount
-const SLIPPAGE_BPS = 50;       // Max swap slippage (50 = 0.5%)
-const USE_SLOW_MODE = true;    // SLOW = free CCTP bridge, settles in ~15-30 min
+const SLIPPAGE_BPS = 50;
 
 const kit = new AppKit();
 
-// One adapter instance covers all Circle wallets — wallet is identified by address per call
+// One adapter covers all chains — wallet is identified by address per call
 const circleAdapter = createCircleWalletsAdapter({
   apiKey: process.env.CIRCLE_API_KEY as string,
   entitySecret: process.env.CIRCLE_ENTITY_SECRET as string,
 });
 
 const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
-const TREASURY_WALLET_ID = process.env.TREASURY_WALLET_ID as string;
-const TREASURY_CHAIN = 'Optimism'; // Central reserve — absorbs excess and funds top-ups
+const RECEIVE_CHAINS = ['Ethereum_Sepolia', 'Base_Sepolia', 'Arc_Testnet'] as const;
 ```
 
-### Step 2: Check Balances + Swap to USDC (Optional)
+### Step 2: Check the Unified Balance
 
-With Circle Wallets, a single API call returns all token balances across all chains — no per-chain RPC reads.
-
-**Output:**
-```
---- Chain Balances ---
-  Base         $1,800  (target $1,000, upper $1,500)  [OVER]
-  Arbitrum       $350  (target $1,000, lower   $500)  [UNDER]
-  Polygon        $980  (target $1,000)                [OK]
-```
+The shape is identical to the ethers flow. The `address` field tells the Circle adapter which wallet to read.
 
 ```typescript
-interface ChainBalance {
-  chain: string;
-  currentBalance: number;
-  upperBound: number;    // Bridge excess out when balance exceeds this
-  targetBalance: number; // Restore to this level when rebalancing in either direction
-  lowerBound: number;    // Draw funds in when balance falls below this
-}
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
 
-async function checkChainBalances(chains: ChainBalance[], swapToUsdc = false): Promise<void> {
-  console.log('\n--- Chain Balances ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: circleAdapter, address: TREASURY_ADDRESS },
+    includePending: true,
+  });
 
-  const sdk = await circleAdapter.getSdk();
-
-  // Single API call — returns all token balances across all chains at once
-  const balanceResponse = await sdk.devc.getWalletTokenBalance({ id: TREASURY_WALLET_ID });
-  const allBalances = balanceResponse.data?.tokenBalances ?? [];
-
-  for (const chain of chains) {
-    const chainBalances = allBalances.filter((b: any) => b.token?.blockchain === chain.chain);
-    chain.currentBalance = chainBalances.reduce(
-      (sum: number, b: any) => sum + parseFloat(b.amount ?? '0'), 0
-    );
-
-    const status =
-      chain.currentBalance > chain.upperBound ? 'OVER'
-      : chain.currentBalance < chain.lowerBound ? 'UNDER'
-      : 'OK';
-
-    const hint = status === 'OVER'
-      ? `, upper $${chain.upperBound.toLocaleString()}`
-      : status === 'UNDER'
-      ? `, lower $${chain.lowerBound.toLocaleString()}`
-      : '';
-    console.log(`  ${chain.chain.padEnd(12)} $${chain.currentBalance.toLocaleString().padStart(6)}  (target $${chain.targetBalance.toLocaleString()}${hint})  [${status}]`);
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
   }
-
-  if (swapToUsdc) { // Enable when treasury holds non-USDC tokens
-    await swapNonUsdcToUsdc(allBalances);
-  }
-}
-
-async function swapNonUsdcToUsdc(allBalances: any[]): Promise<void> {
-  console.log('\n--- Swapping Tokens to USDC ---');
-
-  const nonUsdc = allBalances.filter(
-    (b: any) => b.token?.symbol?.toUpperCase() !== 'USDC' && parseFloat(b.amount ?? '0') > 0
-  );
-
-  if (nonUsdc.length === 0) {
-    console.log('  No non-USDC tokens found');
-    return;
-  }
-
-  for (const holding of nonUsdc) {
-    const chain = holding.token?.blockchain;
-    console.log(`\n  Swapping ${holding.amount} ${holding.token?.symbol} → USDC on ${chain}`);
-
-    try {
-      const result = await kit.swap({
-        from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS }, // address required for Circle Wallets
-        tokenIn: holding.token?.symbol,
-        tokenOut: 'USDC',
-        amountIn: holding.amount,
-        config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS }
-      });
-
-      console.log(`  ✓ Swapped: ${result.txHash}`);
-    } catch (error: any) {
-      console.error(`  ✗ Failed: ${error.message}`);
-    }
-  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
 }
 ```
 
-**When to enable `swapToUsdc`:**
-- Your treasury wallets hold a mix of stablecoins (USDT, DAI, etc.)
-- You want a single asset (USDC) flowing into the main treasury
+### Step 3: Normalize Inflows (Optional Swap to USDC)
 
-### Step 3: Plan Rebalancing
-
-This step is adapter-independent — pure logic, no SDK calls.
+In this testnet flow the only configured swap pair is **EURC → USDC on Arc Testnet** — App Kit currently exposes EURC ↔ USDC liquidity on Arc Testnet. Ethereum Sepolia and Base Sepolia are USDC-only here.
 
 ```typescript
-type Direction = 'OUT' | 'IN'; // OUT = bridge to treasury, IN = draw from treasury
+async function swapInflowsToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
 
-interface RebalanceOp {
-  chain: string;
-  direction: Direction;
-  amount: string;
-}
+  const result = await kit.swap({
+    from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS }, // address required for Circle Wallets
+    tokenIn,                 // 'EURC' on Arc Testnet
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
 
-function planRebalancing(chains: ChainBalance[]): RebalanceOp[] {
-  console.log('\n--- Rebalancing Plan ---');
-  const operations: RebalanceOp[] = [];
-
-  for (const chain of chains) {
-    if (chain.chain === TREASURY_CHAIN) continue; // Treasury chain — skip
-
-    if (chain.currentBalance > chain.upperBound) {
-      // Over upper bound — bridge excess back to target
-      const amount = chain.currentBalance - chain.targetBalance;
-      if (amount >= MIN_BRIDGE_AMOUNT) {
-        console.log(`  ${chain.chain}: OVER — bridge $${amount.toFixed(2)} out to ${TREASURY_CHAIN}`);
-        operations.push({ chain: chain.chain, direction: 'OUT', amount: amount.toFixed(2) });
-      } else {
-        console.log(`  ${chain.chain}: OVER but diff $${amount.toFixed(2)} < min $${MIN_BRIDGE_AMOUNT} — skip`);
-      }
-    } else if (chain.currentBalance < chain.lowerBound) {
-      // Below lower bound — draw from treasury to restore target
-      const amount = chain.targetBalance - chain.currentBalance;
-      if (amount >= MIN_BRIDGE_AMOUNT) {
-        console.log(`  ${chain.chain}: UNDER — draw $${amount.toFixed(2)} in from ${TREASURY_CHAIN}`);
-        operations.push({ chain: chain.chain, direction: 'IN', amount: amount.toFixed(2) });
-      } else {
-        console.log(`  ${chain.chain}: UNDER but diff $${amount.toFixed(2)} < min $${MIN_BRIDGE_AMOUNT} — skip`);
-      }
-    } else {
-      const diff = Math.abs(chain.currentBalance - chain.targetBalance);
-      console.log(`  ${chain.chain}: OK — diff $${diff.toFixed(2)} within bounds — skip`);
-    }
-  }
-
-  return operations;
+  console.log(`  ✓ Swapped: ${result.txHash}`);
 }
 ```
 
-### Step 4: Execute Rebalancing
-
-Bridge each planned operation using SLOW mode for zero protocol fees. The `address` field is required in `from` for Circle Wallets.
+### Step 4: Deposit into the Unified Balance
 
 ```typescript
-async function executeRebalancing(operations: RebalanceOp[]): Promise<void> {
-  console.log('\n--- Executing Rebalancing ---');
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
 
-  for (const op of operations) {
-    const fromChain = op.direction === 'OUT' ? op.chain : TREASURY_CHAIN;
-    const toChain   = op.direction === 'OUT' ? TREASURY_CHAIN : op.chain;
-    const label = `${fromChain} → ${toChain}`;
-    console.log(`\n  Bridging $${op.amount}: ${label}`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS },
+    amount,
+  });
 
-    try {
-      const result = await kit.bridge({
-        from: { adapter: circleAdapter, chain: fromChain as any, address: TREASURY_ADDRESS }, // address required for Circle Wallets
-        to: {
-          adapter: circleAdapter,
-          chain: toChain as any,
-          address: TREASURY_ADDRESS,
-          // Ensures USDC is minted to the treasury address, not the adapter's default
-          recipientAddress: TREASURY_ADDRESS
-        },
-        amount: op.amount,
-        config: { transferSpeed: USE_SLOW_MODE ? 'SLOW' : 'FAST' } // SLOW = free, FAST = ~$10
-      });
-
-      console.log(`  ✓ Bridged: ${result.steps[0].txHash}`);
-    } catch (error: any) {
-      // Catch per-operation so one failure doesn't abort the rest
-      console.error(`  ✗ Failed: ${error.message}`);
-    }
-  }
+  console.log(`  ✓ Deposited: ${result.txHash}`);
 }
 ```
 
-### Run
+### Step 5: Spend Instantly on Any Chain
+
+```typescript
+async function payout(
+  destinationChain: string,
+  amount: string,
+  recipientAddress: string,
+): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: circleAdapter, address: TREASURY_ADDRESS },
+    to: { adapter: circleAdapter, chain: destinationChain, address: TREASURY_ADDRESS, recipientAddress },
+  });
+
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+```
+
+### Complete Example
+
+Save the snippet below as `treasury.ts`, fill in the `.env` values from the Prerequisites section and the `RECIPIENT_ADDRESS` constant in the file.
+
+```typescript
+// treasury.ts
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createCircleWalletsAdapter } from '@circle-fin/adapter-circle-wallets';
+
+const SLIPPAGE_BPS = 50;
+const RECIPIENT_ADDRESS = '0xRecipientAddress'; // ← who you are paying out to
+
+const kit = new AppKit();
+
+const circleAdapter = createCircleWalletsAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string,
+});
+
+const TREASURY_ADDRESS = process.env.TREASURY_ADDRESS as string;
+
+// Non-USDC tokens you accept on each receive chain. Triggers a swap before deposit.
+// On testnet, App Kit currently exposes the EURC ↔ USDC pair on Arc Testnet only.
+const NON_USDC_INFLOWS: Record<string, string[]> = {
+  Ethereum_Sepolia: [],
+  Base_Sepolia:     [],
+  Arc_Testnet:      ['EURC'],
+};
+
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: circleAdapter, address: TREASURY_ADDRESS },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+
+async function swapInflowToUsdc(chain: string, amount: string, tokenIn: string): Promise<void> {
+  console.log(`\n  Swapping ${amount} ${tokenIn} → USDC on ${chain}`);
+  const result = await kit.swap({
+    from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS },
+    tokenIn,
+    tokenOut: 'USDC',
+    amountIn: amount,
+    config: { kitKey: process.env.KIT_KEY as string, slippageBps: SLIPPAGE_BPS },
+  });
+  console.log(`  ✓ Swapped: ${result.txHash}`);
+}
+
+async function depositToUnifiedBalance(chain: string, amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from ${chain} → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: circleAdapter, chain, address: TREASURY_ADDRESS },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+
+async function payout(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const estimate = await kit.unifiedBalance.estimateSpend({
+    amount,
+    from: { adapter: circleAdapter, address: TREASURY_ADDRESS },
+    to: { adapter: circleAdapter, chain: destinationChain, address: TREASURY_ADDRESS, recipientAddress },
+  });
+  console.log(`  Estimated fee: $${estimate.fees?.[0]?.amount ?? '0'}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: circleAdapter, address: TREASURY_ADDRESS },
+    to: { adapter: circleAdapter, chain: destinationChain, address: TREASURY_ADDRESS, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+
+async function main() {
+  await checkUnifiedBalance();
+
+  // Inbound: receive 100 EURC on Arc Testnet, swap to USDC, deposit into the unified balance
+  await swapInflowToUsdc('Arc_Testnet', '100', 'EURC');
+  await depositToUnifiedBalance('Arc_Testnet', '100');
+
+  // Outbound: pay a vendor 50 USDC on Base Sepolia — minted instantly via Gateway
+  await payout('Base_Sepolia', '50', RECIPIENT_ADDRESS);
+
+  await checkUnifiedBalance();
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+```
+
+Run it:
 
 ```bash
-npm run app-kit:treasury-management
-
-# Or run directly
-npx tsx app-kit-use-cases/02-treasury-management.ts
+npx tsx treasury.ts
 ```
 
-### Schedule as a Cron Job
+---
+
+## Implementation: Solana Adapter
+
+Use this if the treasury holds USDC on Solana. The flow is the same — receive on Solana Devnet, deposit into the unified balance, and spend instantly on any other Gateway-supported chain.
+
+A few Solana-specific notes:
+
+- **Key format**: private key is a base58 string (or base64, or a JSON byte array). Public addresses are base58, not `0x`-prefixed.
+- **Swap on testnet**: App Kit does not currently expose a swap pair on Solana Devnet. Skip the swap step there — receive USDC directly.
+- **Cross-chain spend**: spending to an EVM destination needs an EVM adapter for the `to` context (a generic viem adapter on the destination chain is enough — the actual recipient is set with `recipientAddress`).
+
+### Prerequisites
 
 ```bash
-# Run at 2 AM every night (low gas hours)
-0 2 * * * cd /your/project && npm run app-kit:treasury-management >> /var/log/treasury.log 2>&1
+npm install @circle-fin/app-kit @circle-fin/adapter-solana @circle-fin/adapter-viem-v2 @solana/web3.js viem dotenv
 ```
 
----
+```bash
+# .env
+SOLANA_PRIVATE_KEY=YourSolanaBase58PrivateKey   # base58, base64, or JSON byte array
+SOLANA_TREASURY_ADDRESS=YourBase58PublicAddress  # used only for diagnostics
+EVM_DESTINATION_KEY=0xAnyEvmPrivateKey            # signs nothing; only used to build the destination adapter
+```
 
-## Adapter Differences at a Glance
+> The viem private key in `EVM_DESTINATION_KEY` is **not** used to move funds. The destination adapter is only used to resolve the EVM chain context; the recipient is set with `recipientAddress`.
 
-| Step | Ethers | Circle Wallets |
-|---|---|---|
-| **Init adapter** | `createEthersAdapterFromPrivateKey({ privateKey })` | `createCircleWalletsAdapter({ apiKey, entitySecret })` |
-| **Read balances** | ERC-20 `balanceOf` via JSON-RPC per chain | `sdk.devc.getWalletTokenBalance({ id })` — one call, all chains |
-| **from context** | `{ adapter, chain }` | `{ adapter, chain, address }` — address required |
-| **Swap / Bridge** | Identical | Identical |
+### Step 1: Setup
 
----
+```typescript
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createSolanaAdapterFromPrivateKey } from '@circle-fin/adapter-solana';
+import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
 
-## Key Takeaways
+const kit = new AppKit();
 
-### 1. **Bidirectional Rebalancing Keeps Every Chain Operational**
-- Chains above the upper bound flush excess to the treasury; chains below the lower bound draw from it
-- A single job handles both directions — no separate sweep and top-up processes needed
-- The treasury on Optimism acts as the reserve, absorbing and distributing funds automatically
+// Source adapter — signs deposits from Solana Devnet
+const solanaAdapter = createSolanaAdapterFromPrivateKey({
+  privateKey: process.env.SOLANA_PRIVATE_KEY as string,
+});
 
-### 2. **Minimum Bridge Amount Prevents Noise**
-- Rebalancing only triggers when the difference meets the `MIN_BRIDGE_AMOUNT` floor
-- Eliminates micro-transactions that cost more in gas than they move
-- Tune this value based on your expected gas costs per chain
+// Destination adapter — only resolves the EVM destination chain for kit.unifiedBalance.spend()
+const evmDestinationAdapter = createViemAdapterFromPrivateKey({
+  privateKey: process.env.EVM_DESTINATION_KEY as `0x${string}`,
+});
+```
 
-### 3. **Zero Bridge Fees with SLOW Mode**
-- SLOW mode uses Circle's CCTP without charging a protocol fee
-- Settlement takes ~15-30 minutes — perfectly fine for treasury operations
-- Switch to FAST only when speed is critical (it costs ~$10 per bridge)
+### Step 2: Check the Unified Balance
 
-### 4. **Swap First, Then Rebalance**
-- Swap non-USDC tokens to USDC on each chain before rebalancing
-- Keeps the central treasury in a single asset
-- Swap is optional — skip if your wallets already hold only USDC
+```typescript
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: solanaAdapter },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+```
 
----
+### Step 3: Normalize Inflows (Optional Swap to USDC)
 
-## Next Steps
+Skip on testnet. Solana Devnet does not currently expose a swap pair in App Kit, so receive USDC directly. On mainnet (Solana), `kit.swap()` follows the same shape as the EVM examples — just swap `from.adapter` for `solanaAdapter`.
 
-1. **Database Integration**: Persist transaction hashes for accounting and audit trails
-2. **Alerts**: Notify on Slack/email when a chain crosses its upper or lower bound, or when a bridge fails
-3. **Gas Timing**: Check gas prices before running and delay if unusually high
+### Step 4: Deposit into the Unified Balance
+
+```typescript
+async function depositToUnifiedBalance(amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from Solana Devnet → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: solanaAdapter, chain: 'Solana_Devnet' },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+```
+
+### Step 5: Spend Instantly on Any Chain
+
+```typescript
+async function payoutToEvm(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: solanaAdapter },
+    to: { adapter: evmDestinationAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+```
+
+### Complete Example
+
+Save the snippet below as `treasury.ts`, fill in the `.env` values from the Prerequisites section and the `RECIPIENT_ADDRESS` constant in the file.
+
+```typescript
+// treasury.ts
+import 'dotenv/config';
+import { AppKit } from '@circle-fin/app-kit';
+import { createSolanaAdapterFromPrivateKey } from '@circle-fin/adapter-solana';
+import { createViemAdapterFromPrivateKey } from '@circle-fin/adapter-viem-v2';
+
+const RECIPIENT_ADDRESS = '0xRecipientAddress'; // ← EVM address that receives the payout
+
+const kit = new AppKit();
+
+// Source adapter — signs deposits from Solana Devnet
+const solanaAdapter = createSolanaAdapterFromPrivateKey({
+  privateKey: process.env.SOLANA_PRIVATE_KEY as string,
+});
+
+// Destination adapter — only resolves the EVM destination chain
+const evmDestinationAdapter = createViemAdapterFromPrivateKey({
+  privateKey: process.env.EVM_DESTINATION_KEY as `0x${string}`,
+});
+
+async function checkUnifiedBalance(): Promise<void> {
+  console.log('\n--- Unified Balance ---');
+  const balances = await kit.unifiedBalance.getBalances({
+    sources: { adapter: solanaAdapter },
+    includePending: true,
+  });
+  console.log(`  Total confirmed:  $${balances.totalConfirmedBalance}`);
+  for (const entry of balances.balances ?? []) {
+    console.log(`    ${entry.chain.padEnd(16)} $${entry.amount}`);
+  }
+  console.log(`  Pending deposits: $${balances.totalPendingBalance ?? '0.00'}`);
+}
+
+async function depositToUnifiedBalance(amount: string): Promise<void> {
+  console.log(`\n  Depositing $${amount} USDC from Solana Devnet → unified balance`);
+  const result = await kit.unifiedBalance.deposit({
+    from: { adapter: solanaAdapter, chain: 'Solana_Devnet' },
+    amount,
+  });
+  console.log(`  ✓ Deposited: ${result.txHash}`);
+}
+
+async function payoutToEvm(destinationChain: string, amount: string, recipientAddress: string): Promise<void> {
+  console.log(`\n  Paying out $${amount} USDC to ${recipientAddress} on ${destinationChain}`);
+
+  const estimate = await kit.unifiedBalance.estimateSpend({
+    amount,
+    from: { adapter: solanaAdapter },
+    to: { adapter: evmDestinationAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  Estimated fee: $${estimate.fees?.[0]?.amount ?? '0'}`);
+
+  const result = await kit.unifiedBalance.spend({
+    amount,
+    from: { adapter: solanaAdapter },
+    to: { adapter: evmDestinationAdapter, chain: destinationChain, recipientAddress },
+  });
+  console.log(`  ✓ Minted on ${destinationChain}: ${result.txHash}`);
+}
+
+async function main() {
+  await checkUnifiedBalance();
+
+  // Inbound: deposit 100 USDC received on Solana Devnet into the unified balance
+  await depositToUnifiedBalance('100');
+
+  // Outbound: pay a vendor 50 USDC on Base Sepolia — minted instantly via Gateway
+  await payoutToEvm('Base_Sepolia', '50', RECIPIENT_ADDRESS);
+
+  await checkUnifiedBalance();
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+```
+
+Run it:
+
+```bash
+npx tsx treasury.ts
+```
 
 ---
 
 ## Resources
 
 - [Circle App Kit Documentation](https://developers.circle.com/app-kit)
+- [Unified Balance Kit README](https://www.npmjs.com/package/@circle-fin/unified-balance-kit)
 - [Adapter Setups](https://developers.circle.com/app-kit/adapter-setups)
 - [Circle Wallet Quickstart](https://developers.circle.com/w3s/docs/programmable-wallets-quickstart)
-- [Circle CCTP Documentation](https://developers.circle.com/cctp)
-- [Full Example Code](./02-treasury-management.ts)
