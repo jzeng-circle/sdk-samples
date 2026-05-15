@@ -259,7 +259,6 @@ npm install @circle-fin/app-kit @circle-fin/adapter-circle-wallets @circle-fin/d
 # .env
 CIRCLE_API_KEY=your_circle_api_key
 CIRCLE_ENTITY_SECRET=your_entity_secret
-INTERNAL_WALLET_ID=your_internal_wallet_id
 INTERNAL_WALLET_ADDRESS=0xYourInternalWalletAddress
 WALLET_SET_ID=your_wallet_set_id
 KIT_KEY=your_kit_key
@@ -274,6 +273,7 @@ PLATFORM_FEE_ADDRESS=0xYourFeeWallet
 import 'dotenv/config';
 import { AppKit } from '@circle-fin/app-kit';
 import { createCircleWalletsAdapter } from '@circle-fin/adapter-circle-wallets';
+import { initiateDeveloperControlledWalletsClient } from '@circle-fin/developer-controlled-wallets';
 
 const PLATFORM_FEE_PERCENT = 2.5;  // Deducted from every order at settlement
 const SESSION_EXPIRY_MINUTES = 15; // How long a payment address stays active
@@ -283,6 +283,13 @@ const kit = new AppKit();
 
 // One adapter instance covers all Circle wallets — wallet is identified by address per call
 const circleAdapter = createCircleWalletsAdapter({
+  apiKey: process.env.CIRCLE_API_KEY as string,
+  entitySecret: process.env.CIRCLE_ENTITY_SECRET as string,
+});
+
+// Direct SDK client — used for wallet creation, balance checks, and transaction submission
+// where kit.send() is not available (developer-controlled adapters require explicit wallet context)
+const circleClient = initiateDeveloperControlledWalletsClient({
   apiKey: process.env.CIRCLE_API_KEY as string,
   entitySecret: process.env.CIRCLE_ENTITY_SECRET as string,
 });
@@ -301,12 +308,11 @@ async function createPaymentSession(orderId: string, orderAmount: string, token:
   const sdk = await circleAdapter.getSdk();
 
   // Circle holds the keys — no private key to manage on your side
-  const walletResponse = await sdk.devc.createWallets({
-    idempotencyKey: `payment-${orderId}`, // Prevents duplicate wallets on retries
+  const walletResponse = await circleClient.createWallets({
     walletSetId: WALLET_SET_ID,
-    blockchains: [chain as any],  // e.g. 'ETH', 'BASE', 'MATIC', 'ARB'
+    accountType: 'EOA',
+    blockchains: [chain as any],  // Circle API format: 'ETH-SEPOLIA', 'BASE-SEPOLIA', 'ARB-SEPOLIA', etc.
     count: 1,
-    metadata: [{ name: `Payment-${orderId}`, refId: orderId }],
   });
 
   const wallet = walletResponse.data?.wallets?.[0];
@@ -332,12 +338,10 @@ Poll the Circle Wallet API via `getWalletTokenBalance` — no RPC node or contra
 
 ```typescript
 async function monitorPayment(session: any): Promise<boolean> {
-  const sdk = await circleAdapter.getSdk();
-
   // Poll every 5 seconds, up to 5 minutes
   for (let attempt = 0; attempt < 60; attempt++) {
     // Circle API returns balance directly — no on-chain read or contract ABI needed
-    const balanceResponse = await sdk.devc.getWalletTokenBalance({ id: session.paymentWalletId });
+    const balanceResponse = await circleClient.getWalletTokenBalance({ id: session.paymentWalletId });
     const balances = balanceResponse.data?.tokenBalances ?? [];
     const tokenBalance = balances.find(
       (b: any) => b.token?.symbol?.toUpperCase() === session.expectedToken.toUpperCase()
@@ -355,22 +359,27 @@ async function monitorPayment(session: any): Promise<boolean> {
 
 ### Step 4: Aggregate to Internal Wallet
 
-The Circle Wallets adapter requires an explicit `address` in the `from` context — one adapter instance covers all wallets.
+`kit.send()` cannot be used with developer-controlled wallets — it calls `adapter.getAddress()` internally without wallet context, which is unsupported. Use `circleClient.createTransaction()` directly instead, passing the token ID from the wallet's balance response.
 
 ```typescript
 async function aggregateToInternalWallet(session: any) {
-  const result = await kit.send({
-    from: {
-      adapter: circleAdapter,
-      chain: session.customerChain as any,
-      address: session.paymentAddress, // Required — identifies which Circle wallet to send from
-    },
-    to: INTERNAL_WALLET_ADDRESS,
-    amount: session.expectedAmount,
-    token: session.expectedToken as any,
-  });
+  // Fetch the token balance to get the token ID required by createTransaction
+  const balanceResponse = await circleClient.getWalletTokenBalance({ id: session.paymentWalletId });
+  const match = (balanceResponse.data?.tokenBalances ?? []).find(
+    (b: any) => b.token?.symbol?.toUpperCase() === session.expectedToken.toUpperCase()
+  ) as any;
+  if (!match) throw new Error(`No ${session.expectedToken} balance found in wallet`);
 
-  return result.txHash ?? '';
+  // Sweep the full expected amount from the temp wallet to the internal aggregation wallet
+  const response = await circleClient.createTransaction({
+    walletId: session.paymentWalletId,
+    tokenId: match.token.id,
+    destinationAddress: INTERNAL_WALLET_ADDRESS,
+    amounts: [session.expectedAmount],
+    fee: { type: 'LEVEL', config: { feeLevel: 'MEDIUM' } },
+  } as any);
+
+  return response.data?.transaction?.id ?? '';
 }
 ```
 
@@ -396,19 +405,20 @@ async function batchSwapToUSDC(chain: string, token: string, totalAmount: number
 }
 
 // Daily or on-demand — bridges USDC to the merchant and collects the platform fee in one tx
-async function settleMerchant(merchantAddress: string, merchantChain: string, amount: number, fee: number) {
+async function settleMerchant(merchantAddress: string, merchantChain: string, amount: number, fee: number, sourceChain: string) {
   const bridgeResult = await kit.bridge({
-    from: { adapter: circleAdapter, chain: 'Ethereum' as any, address: INTERNAL_WALLET_ADDRESS }, // address required for Circle Wallets
+    from: { adapter: circleAdapter, chain: sourceChain as any, address: INTERNAL_WALLET_ADDRESS }, // address required for Circle Wallets
     to: {
-      adapter: circleAdapter,
+      // useForwarder: Circle's relay handles the mint on the destination chain —
+      // no destination adapter or native tokens needed; funds land directly at recipientAddress
       chain: merchantChain as any,
-      address: merchantAddress,
-      // Mints USDC directly to the merchant's external wallet on the destination chain
       recipientAddress: merchantAddress,
+      useForwarder: true,
     },
+    token: 'USDC',
     amount: amount.toFixed(2),
     config: {
-      transferSpeed: 'SLOW', // Free — no CCTP protocol fee
+      transferSpeed: 'FAST',
       // Deducts the platform fee inside the same bridge tx — no separate transfer needed
       // Circle takes 10% of this; your platform receives 90%
       customFee: { value: fee.toFixed(2), recipientAddress: PLATFORM_FEE_WALLET }
@@ -429,7 +439,8 @@ async function settleMerchant(merchantAddress: string, merchantChain: string, am
 | **Create temp wallet** | `ethers.Wallet.createRandom()` — local, no API call | `sdk.devc.createWallets({ blockchains, walletSetId, ... })` — Circle API |
 | **Check balance** | Read ERC-20 contract via JSON-RPC provider | `sdk.devc.getWalletTokenBalance({ id: walletId })` — Circle API |
 | **from context** | `{ adapter, chain }` | `{ adapter, chain, address }` — address required |
-| **Swap / Bridge / Send** | Identical | Identical |
+| **Aggregate (Step 4)** | `kit.send()` | `circleClient.createTransaction()` — `kit.send()` unsupported (calls `getAddress()` without context) |
+| **Swap / Bridge** | Identical | Identical |
 
 ---
 
